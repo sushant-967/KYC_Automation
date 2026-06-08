@@ -1,0 +1,21 @@
+{
+  "_note": "SYNTHETIC adverse-media corpus, hand-authored June 6 for demo polish (§5.5). NOT real reporting about real people. Tied to personas by canonical name so the adverse-media sub-agent has prose to summarize.",
+  "articles": [
+    {
+      "entity": "viktor nazarov",
+      "title": "Cyprus trader named in alleged sanctions-evasion network",
+      "date": "2025-11-02",
+      "source": "SYNTHETIC / demo",
+      "body": "A Limassol-based trading consultant, Viktor Nazarov, was named in filings describing a network that allegedly routed dual-use goods through shell entities to circumvent international sanctions. The filings remain unproven and no charges have been confirmed.",
+      "severity_hint": "high"
+    },
+    {
+      "entity": "rajesh kumar singh",
+      "title": "State official faces questions over undisclosed property holdings",
+      "date": "2025-09-18",
+      "source": "SYNTHETIC / demo",
+      "body": "A mid-level state government official, Rajesh Kumar Singh, faced local scrutiny over property holdings reportedly inconsistent with declared income. The matter was described as under preliminary review.",
+      "severity_hint": "medium"
+    }
+  ]
+}

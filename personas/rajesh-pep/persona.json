@@ -1,0 +1,17 @@
+{
+  "_note": "Persona 2 (§8) — expected outcome: HUMAN REVIEW (domestic PEP match). Synthetic.",
+  "submission": {
+    "customer": {
+      "full_name": "Rajesh Kumar Singh",
+      "dob": "1971-03-22",
+      "address": "Civil Lines, Lucknow, Uttar Pradesh 226001",
+      "nationality": "india",
+      "declared_income": 1200000,
+      "declared_employment": "State government official"
+    },
+    "documents": [
+      { "kind": "aadhaar", "file_id": "rajesh-aadhaar.png" },
+      { "kind": "pan", "file_id": "rajesh-pan.png" }
+    ]
+  }
+}

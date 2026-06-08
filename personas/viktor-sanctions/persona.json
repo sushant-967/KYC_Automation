@@ -1,0 +1,16 @@
+{
+  "_note": "Persona 3 (§8) — expected outcome: ESCALATE (UN-sanctioned match + adverse media). Synthetic.",
+  "submission": {
+    "customer": {
+      "full_name": "Viktor Nazarov",
+      "dob": "1979-04-02",
+      "address": "Limassol, Cyprus",
+      "nationality": "cyprus",
+      "declared_income": 4200000,
+      "declared_employment": "Trading consultant"
+    },
+    "documents": [
+      { "kind": "passport", "file_id": "viktor-passport.png" }
+    ]
+  }
+}

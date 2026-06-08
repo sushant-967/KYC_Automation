@@ -1,0 +1,18 @@
+{
+  "_note": "Persona 1 (§8) — expected outcome: APPROVE. Synthetic test data.",
+  "submission": {
+    "customer": {
+      "full_name": "Priya Sharma",
+      "dob": "1992-07-14",
+      "address": "4th Block, Koramangala, Bengaluru, Karnataka 560034",
+      "nationality": "india",
+      "declared_income": 1800000,
+      "declared_employment": "Software Engineer, Tier-1 IT firm"
+    },
+    "documents": [
+      { "kind": "aadhaar", "file_id": "priya-aadhaar.png" },
+      { "kind": "pan", "file_id": "priya-pan.png" },
+      { "kind": "address_proof", "file_id": "priya-utility-bill.png" }
+    ]
+  }
+}

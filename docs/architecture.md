@@ -1,5 +1,11 @@
 # Agentic KYC Intelligence Platform — Architecture & Build Plan
 
+> ⚠️ **Topology superseded — read [ADR-001](adr-001-single-box-fastapi.md) first.**
+> §3 (stack/topology) and §10 (repo layout) below assumed a Cloudflare Worker +
+> separate MI300X. We now run **everything on one AMD box** with a local Python
+> FastAPI orchestrator next to vLLM. The agent contracts (§4), risk scoring (§4.7),
+> metrics (§6), personas (§8), and the no-external-APIs rule (§5.5) all still hold.
+
 > **Status:** Pre-build planning artifact (June 5, 2026). No code yet — build phase opens June 8.
 > **Hackathon:** TCS & AMD AI Hackathon, Track 1 (Agents). Submission June 12.
 > **Team:** 2 people. Split = MI300X/model owner ("A") + Cloudflare/UI owner ("B").
