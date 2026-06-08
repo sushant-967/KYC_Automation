@@ -3,16 +3,15 @@
 # OpenAI-compatible API at http://localhost:8000/v1. See docs/architecture.md §3.1.
 set -euo pipefail
 
-MODEL="${QWEN_MODEL:-Qwen/Qwen2.5-VL-72B-Instruct}"
+# Pre-quantized FP8 (compressed-tensors) — vLLM auto-detects the quant from the
+# model config, so no --quantization flag. ~76 GB, ungated. ROCm/MI300X gfx942.
+MODEL="${QWEN_MODEL:-RedHatAI/Qwen2.5-VL-72B-Instruct-FP8-dynamic}"
 PORT="${QWEN_PORT:-8000}"
 SERVED_NAME="${QWEN_SERVED_NAME:-qwen2.5-vl-72b}"
 
-# ROCm/MI300X: single 192 GB GPU, FP8 to fit alongside Llama + BGE (~75 GB each).
 exec vllm serve "$MODEL" \
   --served-model-name "$SERVED_NAME" \
   --port "$PORT" \
-  --quantization fp8 \
-  --kv-cache-dtype fp8 \
   --max-model-len "${QWEN_MAX_LEN:-16384}" \
   --gpu-memory-utilization "${QWEN_GPU_UTIL:-0.42}" \
   --limit-mm-per-prompt image=3 \
