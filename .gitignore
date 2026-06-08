@@ -26,6 +26,9 @@ __pycache__/
 .venv/
 venv/
 
+# Claude Code — share settings.json + commands, keep personal/local settings out
+.claude/settings.local.json
+
 # Env / secrets — never commit
 .env
 .env.*

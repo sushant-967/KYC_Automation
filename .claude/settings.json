@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(pip install:*)",
+      "Bash(pytest:*)",
+      "Bash(uvicorn:*)",
+      "Bash(./run.sh:*)",
+      "Bash(bash rocm/pull-models.sh:*)",
+      "Bash(bash rocm/vllm-launch-qwen.sh:*)",
+      "Bash(bash rocm/vllm-launch-llama.sh:*)",
+      "Bash(bash rocm/vllm-launch-bge.sh:*)",
+      "Bash(hf:*)",
+      "Bash(huggingface-cli:*)",
+      "Bash(rocm-smi:*)",
+      "Bash(curl http://localhost:*)",
+      "Bash(curl -s http://localhost:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ]
+  }
+}
