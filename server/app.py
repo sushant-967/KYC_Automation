@@ -46,8 +46,15 @@ class Hub:
 
     def __init__(self) -> None:
         self.store = CaseStore()
-        self.index = ScreeningIndex()
-        self.vllm = VllmClient()
+        self.demo = os.environ.get("KYC_DEMO") == "1"
+        if self.demo:
+            # Deterministic stand-ins for the GPU + planted entities (see demo.py).
+            from demo import DemoVllm, DemoIndex
+            self.index = DemoIndex()
+            self.vllm = DemoVllm()
+        else:
+            self.index = ScreeningIndex()
+            self.vllm = VllmClient()
         self._subs: dict[str, set[asyncio.Queue]] = {}
 
     def subscribe(self, case_id: str) -> asyncio.Queue:
@@ -86,7 +93,7 @@ def _now() -> str:
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"ok": True, "entities_loaded": len(hub.index.rows)}
+    return {"ok": True, "demo": hub.demo, "entities_loaded": len(hub.index.rows)}
 
 
 @app.get("/api/cases")

@@ -1,0 +1,4 @@
+# Streamlit dashboard — thin HTTP client of the FastAPI backend (apps/ui/dashboard.py)
+streamlit>=1.36
+httpx>=0.27
+pandas>=2.0

@@ -13,6 +13,7 @@ pure Python.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -47,9 +48,14 @@ class PipelineIO:
 async def run_pipeline(state: CaseState, vllm: VllmClient, io: PipelineIO) -> CaseState:
     t0 = time.perf_counter()
     gpu: list[GpuCallMetric] = []
+    # Optional pacing so the live SSE pipeline is watchable in a dashboard.
+    # Zero in production; set e.g. KYC_STEP_DELAY_MS=500 for demos.
+    step_delay = float(os.environ.get("KYC_STEP_DELAY_MS", "0")) / 1000
 
     async def step(name: str, coro_or_value):
         io.emit(name, "running", None)
+        if step_delay:
+            await asyncio.sleep(step_delay)
         started = time.perf_counter()
         result = await coro_or_value if asyncio.iscoroutine(coro_or_value) else coro_or_value
         state.metrics.per_agent[name] = AgentMetric(latency_ms=(time.perf_counter() - started) * 1000)
