@@ -1,9 +1,9 @@
 """
-store.py — SQLite-backed case store (replaces the Cloudflare Durable Object).
+store.py — SQLite-backed case store.
 
 One row per case holds the full CaseState JSON; a separate append-only table is
-the audit log so it survives process restarts (§5: "audit log is persistent even
-if the DO restarts"). SQLite with WAL is plenty for a single-box demo.
+the audit log so it survives process restarts. SQLite with WAL is plenty for a
+single-box demo.
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 """
 screening_index.py — local recall over the bundled OpenSanctions entities (§4.4).
 
-Replaces Cloudflare Vectorize. Two backends, same interface:
+Two backends, same interface:
   * numpy brute-force cosine over an in-memory float32 matrix (default; ~100K×1024
     is ~400 MB and a query is a single matmul — a few ms on this box).
   * FAISS index if available (drop-in upgrade for larger corpora).
