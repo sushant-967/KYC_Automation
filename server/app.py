@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from schemas import (AuditEvent, CaseMetrics, CaseState, HumanDecision, Submission)
 from store import CaseStore
 from screening_index import ScreeningIndex
-from vllm_client import VllmClient
+from vllm_client import VllmClient, make_vllm_client
 from pipeline import PipelineIO, run_pipeline
 from agents.intake import run_intake
 
@@ -54,7 +54,7 @@ class Hub:
             self.vllm = DemoVllm()
         else:
             self.index = ScreeningIndex()
-            self.vllm = VllmClient()
+            self.vllm = make_vllm_client()
         self._subs: dict[str, set[asyncio.Queue]] = {}
 
     def subscribe(self, case_id: str) -> asyncio.Queue:

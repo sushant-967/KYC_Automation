@@ -5,5 +5,8 @@ pydantic>=2.7
 httpx>=0.27
 numpy>=1.26
 langgraph>=0.2
+# Optional — only needed for KYC_BACKEND=groq (laptop dev path), and for
+# `ingest.py --backend local`. Adds torch (~600 MB), so left opt-in.
+# sentence-transformers>=3.0
 # optional: faiss-cpu for larger sanctions corpora (screening_index falls back to numpy)
 # faiss-cpu>=1.8

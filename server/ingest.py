@@ -6,8 +6,13 @@ FollowTheMoney JSON-lines export, writes one row per entity into opensanctions.d
 and embeds `name + aliases` via the local BGE server (:8002) so screening_index.py
 can do in-process vector recall.
 
+    # vLLM BGE on the AMD box (default):
     python ingest.py --input ../data/opensanctions/snapshot.jsonl \
                      --limit 100000 --bge http://localhost:8002/v1
+
+    # Or on a laptop without vLLM, embed via sentence-transformers:
+    python ingest.py --input ../data/opensanctions/snapshot.jsonl \
+                     --limit 100000 --backend local
 
 Topics drive the sanctions / PEP / crime sub-agent filters (§4.4):
     sanction, sanction.linked     → sanctions sub-agent
@@ -34,28 +39,59 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="OpenSanctions FtM JSON-lines export")
     ap.add_argument("--db", default=str(DEFAULT_DB))
-    ap.add_argument("--bge", default="http://localhost:8002/v1")
+    ap.add_argument("--backend", choices=["vllm", "local"], default="vllm",
+                    help="vllm = call BGE server (default); local = sentence-transformers on CPU")
+    ap.add_argument("--bge", default="http://localhost:8002/v1",
+                    help="vLLM BGE base URL (used when --backend vllm)")
+    ap.add_argument("--local-model", default="BAAI/bge-large-en-v1.5",
+                    help="sentence-transformers model id (used when --backend local)")
     ap.add_argument("--limit", type=int, default=0, help="0 = no limit")
     args = ap.parse_args()
 
     conn = _open_db(Path(args.db))
-    client = httpx.Client(timeout=120)
+    embedder = _make_embedder(args)
 
     batch_rows: list[dict] = []
     total = 0
     for entity in _read_entities(Path(args.input), args.limit):
         batch_rows.append(entity)
         if len(batch_rows) >= BATCH:
-            total += _flush(conn, client, args.bge, batch_rows)
+            total += _flush(conn, embedder, batch_rows)
             batch_rows.clear()
             print(f"\r ingested {total} entities…", end="", file=sys.stderr)
     if batch_rows:
-        total += _flush(conn, client, args.bge, batch_rows)
+        total += _flush(conn, embedder, batch_rows)
 
     conn.commit()
     conn.close()
     print(f"\n done. {total} entities → {args.db}", file=sys.stderr)
     return 0
+
+
+def _make_embedder(args):
+    """Return a callable list[str] -> list[list[float]] for whichever backend."""
+    if args.backend == "vllm":
+        client = httpx.Client(timeout=120)
+        bge_url = args.bge
+        def embed(texts: list[str]) -> list[list[float]]:
+            resp = client.post(f"{bge_url}/embeddings",
+                               json={"model": BGE_MODEL, "input": texts})
+            resp.raise_for_status()
+            return [d["embedding"] for d in resp.json()["data"]]
+        return embed
+    # local sentence-transformers — same model id as ScreeningIndex consumers expect
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+    except ImportError as e:
+        raise SystemExit(
+            "--backend local needs `sentence-transformers`. Install: "
+            "pip install sentence-transformers"
+        ) from e
+    st = SentenceTransformer(args.local_model)
+    def embed(texts: list[str]) -> list[list[float]]:
+        arr = st.encode(texts, normalize_embeddings=True)
+        return arr.tolist() if hasattr(arr, "tolist") else [list(v) for v in arr]
+    return embed
 
 
 def _open_db(path: Path) -> sqlite3.Connection:
@@ -103,10 +139,9 @@ def _read_entities(path: Path, limit: int):
                 return
 
 
-def _flush(conn: sqlite3.Connection, client: httpx.Client, bge_url: str,
-           rows: list[dict]) -> int:
+def _flush(conn: sqlite3.Connection, embed, rows: list[dict]) -> int:
     texts = [f"{r['name']} {' '.join(r['aliases'][:5])}".strip() for r in rows]
-    vectors = _embed(client, bge_url, texts)
+    vectors = embed(texts)
     conn.executemany(
         "INSERT OR REPLACE INTO entities VALUES (?,?,?,?,?,?,?,?,?,?)",
         [
@@ -118,12 +153,6 @@ def _flush(conn: sqlite3.Connection, client: httpx.Client, bge_url: str,
         ],
     )
     return len(rows)
-
-
-def _embed(client: httpx.Client, bge_url: str, texts: list[str]) -> list[list[float]]:
-    resp = client.post(f"{bge_url}/embeddings", json={"model": BGE_MODEL, "input": texts})
-    resp.raise_for_status()
-    return [d["embedding"] for d in resp.json()["data"]]
 
 
 if __name__ == "__main__":
