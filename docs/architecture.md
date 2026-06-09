@@ -5,9 +5,8 @@ outputs, how risk is scored, what we measure, and which personas drive the demo.
 
 The platform runs on a single AMD MI300X box: vLLM serves the three models
 locally and a Python FastAPI app orchestrates the nine agents through a
-LangGraph `StateGraph`. The single-box build is recorded in
-[ADR-001](adr-001-single-box-fastapi.md); this doc focuses on agent contracts
-and pipeline behavior, which the topology choice does not affect.
+LangGraph `StateGraph`. This doc focuses on agent contracts and pipeline
+behavior, which the topology choice does not affect.
 
 > **Hackathon:** TCS & AMD AI Hackathon, Track 1 (Agents). Submission June 12.
 

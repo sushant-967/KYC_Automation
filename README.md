@@ -12,7 +12,6 @@ inference served locally by **vLLM** on a single **AMD MI300X** box. No
 external inference or data APIs at runtime in the production path.
 
 > Deeper context: [`docs/architecture.md`](docs/architecture.md) ·
-> single-box pivot: [`docs/adr-001-single-box-fastapi.md`](docs/adr-001-single-box-fastapi.md) ·
 > hackathon brief: [`docs/tcs-amd-ai-hackathon.md`](docs/tcs-amd-ai-hackathon.md)
 
 ---

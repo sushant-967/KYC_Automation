@@ -8,12 +8,11 @@ rationale for every decision.
 ## ⚠️ Architecture — read this first
 
 **Everything runs on ONE AMD MI300X box.** vLLM serves the models locally and a
-Python **FastAPI** app orchestrates the agents over `localhost`. There is **no
-Cloudflare** anywhere — the original Workers/Durable-Objects/D1/Vectorize/Tunnel
-plan was dropped on day 1. See `docs/adr-001-single-box-fastapi.md`. The planning
-doc `docs/architecture.md` is still the source of truth for *agent behavior* (§4),
-risk scoring (§4.7), metrics (§6), and personas (§8) — but its §3 topology and §10
-layout are superseded by the ADR.
+Python **FastAPI** app orchestrates the agents (via a LangGraph `StateGraph`)
+over `localhost`. There is **no Cloudflare** anywhere — an earlier plan briefly
+considered Workers / Durable Objects / D1 / Vectorize / Tunnel and was dropped
+on day 1. `docs/architecture.md` is the source of truth for agent behavior,
+risk scoring, metrics, and personas.
 
 If a request implies Cloudflare/Workers/Durable Objects/Vectorize, stop — that's
 the old design. Use the local equivalents below.
