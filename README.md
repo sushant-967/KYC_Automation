@@ -198,13 +198,114 @@ docs/                  ← architecture, ADRs, hackathon brief
 Submission shape lives in
 [`server/schemas.py`](server/schemas.py) — `Submission` → `CaseState`.
 
-## Data & attribution
+## Sanctions / PEP / adverse-media dataset
 
-Sanctions / PEP / adverse-media data is bundled from **OpenSanctions**
-(CC-BY-NC 4.0, non-commercial — see
-[`data/opensanctions/ATTRIBUTION.md`](data/opensanctions/ATTRIBUTION.md)).
-Demo ID documents and adverse-media articles are **synthetic** and clearly
-labeled.
+### Why we need one at all
+
+The screening agent (§4.4 of the architecture doc) has to answer three
+questions per customer: are they on a sanctions list, a PEP list, or in
+adverse media? Each "yes" feeds the deterministic risk score (sanctions
++50, PEP +30, adverse +20×severity). With no list to query, every customer
+scores low → every customer is approved → there's nothing for the
+explainability agent to explain. The bundled list is what makes the demo
+land for an Indian banking audience.
+
+### What we use — OpenSanctions
+
+Source: **[OpenSanctions](https://www.opensanctions.org/)**, the consolidated
+open feed of every major global sanctions + PEP source (UN Security Council,
+OFAC SDN, EU consolidated, UK HMT, Interpol, ~150 national PEP datasets
+including several Indian ones). One bulk download covers what would otherwise
+be 20+ separate API integrations.
+
+- Format: FollowTheMoney JSON-lines (entity-per-line, well-structured, with
+  aliases / DOB / country / dataset provenance per entity).
+- Acquisition: `https://data.opensanctions.org/datasets/`
+- License: **CC-BY-NC 4.0** — non-commercial. The hackathon is non-commercial,
+  attribution is in slides + README + [`data/opensanctions/ATTRIBUTION.md`](data/opensanctions/ATTRIBUTION.md).
+- If the NC clause is a problem, the OFAC SDN list (public domain) is
+  schema-compatible — `ingest.py` accepts it as a drop-in.
+
+### India relevance
+
+OpenSanctions' default collection skews global (4.9 M entities, most of them
+irrelevant to an Indian bank), so an unfiltered ingest matches Indian customers
+against arbitrary UN designees instead of meaningful Indian PEPs / wanted
+persons / sanctioned entities. The datasets that actually matter for an
+Indian-bank demo — all verified to exist in the OpenSanctions catalog:
+
+| Dataset id | Entities | Role |
+|---|---|---|
+| `in_sansad` | 19,079 | **PEPs** — Lok Sabha + Rajya Sabha members |
+| `in_nse_debarred` | 31,391 | **adverse media** — NSE-debarred entities (fraud / insider trading) |
+| `in_mha_banned` | 260 | **sanctions** — MHA-banned organizations |
+| `sanctions` (global) | 283,621 | UN / OFAC / EU / UK consolidated — includes India-relevant designees |
+
+Total: ~334 K entities, ~310 MB raw download. That's the recommended demo
+dataset.
+
+### Disk footprint
+
+Per entity (measured, not estimated): ~500–1500 bytes of structured JSON
+depending on dataset density, plus the embedding. The embedding dominates
+larger entities; JSON dominates the smallest ones.
+
+| Backend | Embedding dim | Embedding bytes |
+|---|---|---|
+| vLLM BGE-large (AMD box) | 1024 × float32 | ~4 KB |
+| fastembed BGE-small (laptop) | 384 × float32 | ~1.5 KB |
+
+Total `server/opensanctions.db` size:
+
+| Entities | bge-large (AMD) | bge-small (laptop) |
+|---|---|---|
+| 50 K (just `in_sansad` + `in_nse_debarred`) | ~280 MB | ~135 MB |
+| **334 K (India subset, recommended)** | **~1.9 GB** | **~900 MB** |
+| 4.9 M (full unfiltered default) | ~28 GB | ~13 GB |
+
+The raw JSONL is ~310 MB (India subset) or ~4.5 GB (full default). You can
+delete it after ingest — only the SQLite DB is queried at runtime.
+
+### When you actually need it
+
+Tied to the four onboarding paths at the top of this README:
+
+| Path | Dataset? | Why |
+|---|---|---|
+| A. Smoke test | **no** | `EmptyIndex` — verifying wiring only |
+| B. `KYC_DEMO=1` | **no** | `demo.py` plants Viktor + Rajesh as fake entities, so screening still produces real `escalate` / `review` outcomes |
+| C. Groq laptop | **yes, India subset** | run `data/opensanctions/fetch.sh` (~310 MB raw) |
+| D. AMD box (production demo) | **yes, India subset** | same fetch script, then ingest with `--backend vllm` |
+
+### Acquire & ingest
+
+One script downloads the India-focused subset and (optionally) runs ingest
+against either backend. No auth required.
+
+```bash
+# Just download — prints the ingest commands at the end
+data/opensanctions/fetch.sh
+
+# Download + ingest locally (fastembed, no GPU)
+data/opensanctions/fetch.sh --ingest local
+
+# Download + ingest via vLLM BGE on :8002 (AMD box)
+data/opensanctions/fetch.sh --ingest vllm
+
+# Pin to a specific snapshot date for a reproducible demo
+data/opensanctions/fetch.sh --pin 20260610
+
+# Or, for the full 4.9 M-entity default collection (not recommended)
+data/opensanctions/fetch.sh --full
+```
+
+The script is idempotent — it skips files that are already downloaded unless
+you pass `--force`. Pin the snapshot date in
+[`data/opensanctions/ATTRIBUTION.md`](data/opensanctions/ATTRIBUTION.md) once
+you've fetched a known-good version.
+
+Demo ID documents and adverse-media articles in `data/adverse-media/` and
+`personas/*/` are **synthetic** and clearly labeled.
 
 ## Conventions
 
