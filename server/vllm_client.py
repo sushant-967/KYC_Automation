@@ -9,8 +9,10 @@ Default backend is the three vLLM servers on this box (§3 hard rule for the dem
 
 For laptop dev (no MI300X), the client can also point at Groq for chat — set
 `KYC_BACKEND=groq` and provide `GROQ_API_KEY`. Embeddings then fall back to a
-local sentence-transformers BGE so the screening recall index stays in the same
-vector space; vector embeddings are not a Groq-served API.
+local `fastembed` BGE (ONNX, ~130 MB, no torch) so the screening recall index
+stays in the BGE family — Groq doesn't serve embeddings. The local BGE model
+defaults to bge-small (384-d), so ingest must use the same model: `ingest.py
+--backend local`. The AMD-box path keeps using bge-large (1024-d) via vLLM.
 
 Each chat/embed call records latency into a `GpuCallMetric` for slide 4 (§6).
 """
@@ -44,7 +46,7 @@ class VllmConfig:
     bge_url: Optional[str] = "http://localhost:8002/v1"
     bge_model: str = BGE
     api_key: Optional[str] = None  # sent as Bearer on every chat call when set
-    local_embedder_model: Optional[str] = None  # if set, embed() uses sentence-transformers locally
+    local_embedder_model: Optional[str] = None  # if set, embed() uses fastembed locally
     timeout_s: float = 120.0
 
 
@@ -63,7 +65,7 @@ class VllmClient:
     def __init__(self, cfg: Optional[VllmConfig] = None):
         self.cfg = cfg or VllmConfig()
         self._client = httpx.AsyncClient(timeout=self.cfg.timeout_s)
-        self._st_model = None  # lazy sentence-transformers, only for local-embedder path
+        self._local_embedder = None  # lazy fastembed, only when cfg.local_embedder_model is set
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -128,28 +130,28 @@ class VllmClient:
         return {"Authorization": f"Bearer {self.cfg.api_key}"} if self.cfg.api_key else None
 
     async def _embed_local(self, text: str | list[str]) -> tuple[list[list[float]], GpuCallMetric]:
-        """Compute embeddings on-process via sentence-transformers (CPU, lazy-loaded)."""
-        self._ensure_st_model()
+        """Compute embeddings on-process via fastembed ONNX (CPU, lazy-loaded)."""
+        self._ensure_local_embedder()
         inputs = [text] if isinstance(text, str) else list(text)
         started = time.perf_counter()
-        arr = await asyncio.to_thread(
-            self._st_model.encode, inputs, normalize_embeddings=True)
+        # fastembed.embed() is a generator yielding L2-normalized np.ndarray per input.
+        arrs = await asyncio.to_thread(lambda: list(self._local_embedder.embed(inputs)))
         latency = (time.perf_counter() - started) * 1000
-        vectors = arr.tolist() if hasattr(arr, "tolist") else [list(v) for v in arr]
+        vectors = [a.tolist() for a in arrs]
         return vectors, GpuCallMetric(
             ts=_now(), model=f"local:{self.cfg.local_embedder_model}", latency_ms=latency)
 
-    def _ensure_st_model(self) -> None:
-        if self._st_model is not None:
+    def _ensure_local_embedder(self) -> None:
+        if self._local_embedder is not None:
             return
         try:
-            from sentence_transformers import SentenceTransformer  # type: ignore
+            from fastembed import TextEmbedding  # type: ignore
         except ImportError as e:
             raise RuntimeError(
-                "KYC_BACKEND=groq needs `sentence-transformers` for the embedding path. "
-                "Install it: pip install sentence-transformers"
+                "KYC_BACKEND=groq needs `fastembed` for the embedding path. "
+                "Install it: pip install fastembed"
             ) from e
-        self._st_model = SentenceTransformer(self.cfg.local_embedder_model)
+        self._local_embedder = TextEmbedding(model_name=self.cfg.local_embedder_model)
 
 
 # ── Backend factory ─────────────────────────────────────────────────────────
@@ -165,7 +167,7 @@ def make_vllm_client() -> VllmClient:
         GROQ_BASE_URL          (default https://api.groq.com/openai/v1)
         GROQ_VISION_MODEL      (default meta-llama/llama-4-scout-17b-16e-instruct)
         GROQ_REASON_MODEL      (default llama-3.3-70b-versatile)
-        KYC_LOCAL_EMBEDDER     (default BAAI/bge-large-en-v1.5)
+        KYC_LOCAL_EMBEDDER     (default BAAI/bge-small-en-v1.5)
     """
     backend = os.environ.get("KYC_BACKEND", "vllm").lower()
     if backend in ("vllm", ""):
@@ -184,7 +186,7 @@ def make_vllm_client() -> VllmClient:
             bge_url=None,
             api_key=api_key,
             local_embedder_model=os.environ.get(
-                "KYC_LOCAL_EMBEDDER", "BAAI/bge-large-en-v1.5"),
+                "KYC_LOCAL_EMBEDDER", "BAAI/bge-small-en-v1.5"),
         ))
     raise RuntimeError(f"unknown KYC_BACKEND={backend!r} (expected 'vllm' or 'groq')")
 

@@ -43,8 +43,8 @@ def main() -> int:
                     help="vllm = call BGE server (default); local = sentence-transformers on CPU")
     ap.add_argument("--bge", default="http://localhost:8002/v1",
                     help="vLLM BGE base URL (used when --backend vllm)")
-    ap.add_argument("--local-model", default="BAAI/bge-large-en-v1.5",
-                    help="sentence-transformers model id (used when --backend local)")
+    ap.add_argument("--local-model", default="BAAI/bge-small-en-v1.5",
+                    help="fastembed model id (used when --backend local)")
     ap.add_argument("--limit", type=int, default=0, help="0 = no limit")
     args = ap.parse_args()
 
@@ -79,18 +79,17 @@ def _make_embedder(args):
             resp.raise_for_status()
             return [d["embedding"] for d in resp.json()["data"]]
         return embed
-    # local sentence-transformers — same model id as ScreeningIndex consumers expect
+    # local fastembed — ONNX-based BGE, must match the model used at runtime
     try:
-        from sentence_transformers import SentenceTransformer  # type: ignore
+        from fastembed import TextEmbedding  # type: ignore
     except ImportError as e:
         raise SystemExit(
-            "--backend local needs `sentence-transformers`. Install: "
-            "pip install sentence-transformers"
+            "--backend local needs `fastembed`. Install: pip install fastembed"
         ) from e
-    st = SentenceTransformer(args.local_model)
+    st = TextEmbedding(model_name=args.local_model)
     def embed(texts: list[str]) -> list[list[float]]:
-        arr = st.encode(texts, normalize_embeddings=True)
-        return arr.tolist() if hasattr(arr, "tolist") else [list(v) for v in arr]
+        arrs = list(st.embed(texts))
+        return [a.tolist() for a in arrs]
     return embed
 
 
