@@ -9,5 +9,13 @@ langgraph>=0.2
 # `ingest.py --backend local`. fastembed is ONNX-based (~5 MB lib + ~130 MB
 # model file), no torch. Opt-in so the AMD-box install stays lean.
 # fastembed>=0.4
+
+# Optional — PaddleOCR pre-pass for the extraction agent (server/ocr.py).
+# Reads raw text from ID images before the vision LLM sees them so the demo
+# path gets real raw_text and the vision model gets a strong textual hint.
+# Heavy (~270 MB paddlepaddle), so opt-in. Baked into server/Dockerfile.
+# paddleocr>=2.7
+# paddlepaddle>=2.6
+# pillow>=10
 # optional: faiss-cpu for larger sanctions corpora (screening_index falls back to numpy)
 # faiss-cpu>=1.8

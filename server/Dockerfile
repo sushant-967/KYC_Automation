@@ -28,7 +28,13 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 #    Adds ~5 MB of code now; the model file lands in the HF cache at runtime.
 RUN pip install fastembed
 
-# 3. Server source + the rocm/prompts the deep agents load.
+# 3. PaddleOCR — pre-OCR pass for the extraction agent. ~270 MB of paddlepaddle
+#    plus paddleocr's own model weights download on first use. Heavy, but
+#    fragile to install natively on Apple Silicon, so baking it into the
+#    Linux image is the safest way to give all backends real OCR text.
+RUN pip install paddleocr paddlepaddle pillow
+
+# 4. Server source + the rocm/prompts the deep agents load.
 COPY server/ /repo/server/
 COPY rocm/prompts/ /repo/rocm/prompts/
 

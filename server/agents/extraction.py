@@ -1,9 +1,15 @@
 """
 Extraction Agent (DEEP ★, §4.2) — Qwen2.5-VL-72B via vLLM :8000.
 
-Per document: send the image + a per-doc-kind JSON-schema prompt, get structured
-fields + confidence, run deterministic format checks (PAN regex, MRZ checksum,
-Aadhaar Verhoeff), and MASK the Aadhaar number before it propagates downstream.
+Per document: an optional PaddleOCR pre-pass produces raw text; that text plus
+the image are sent to the vision LLM with a per-doc-kind JSON-schema prompt;
+the LLM returns structured fields + confidence; deterministic format checks
+run (PAN regex, MRZ checksum, Aadhaar Verhoeff); Aadhaar is MASKED before it
+propagates downstream.
+
+If PaddleOCR isn't installed, `ocr.extract_text` silently returns "" and the
+vision LLM does extraction on the image alone — no behavior change for users
+who don't install it.
 """
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ from typing import Awaitable, Callable
 from schemas import (DocumentRef, ExtractedDocument, ExtractionOutput,
                      GpuCallMetric, Validations)
 from vllm_client import VllmClient
+from ocr import extract_text as ocr_extract_text
 
 PAN_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
 _PROMPT_DIR = Path(__file__).resolve().parents[2] / "rocm" / "prompts"
@@ -30,12 +37,14 @@ async def run_extraction(
 
     for doc in documents:
         image_url = await load_image(doc.file_id)
+        # OCR pre-pass — empty string if PaddleOCR isn't installed or image is blank.
+        raw_text = await ocr_extract_text(image_url)
         result = await vllm.extract(
             [
                 {"role": "system", "content": _system_prompt(doc.kind.value)},
                 {"role": "user", "content": [
                     {"type": "text",
-                     "text": f"Extract all fields from this {doc.kind.value}. Return JSON only."},
+                     "text": _user_prompt(doc.kind.value, raw_text)},
                     {"type": "image_url", "image_url": {"url": image_url}},
                 ]},
             ],
@@ -48,6 +57,7 @@ async def run_extraction(
             kind=doc.kind,
             fields=_mask_sensitive(doc.kind.value, fields),
             confidence=float(fields.get("_confidence", 0.5)),
+            raw_text=raw_text or None,
             validations=_format_checks(doc.kind.value, fields),
             masked_fields=["aadhaarNumber"] if doc.kind.value == "aadhaar" else [],
         ))
@@ -63,6 +73,20 @@ def _system_prompt(kind: str) -> str:
         "Include a numeric _confidence in [0,1]. Do not invent unreadable fields."
     )
     return f"{base}\n\nDocument kind: {kind}."
+
+
+def _user_prompt(kind: str, raw_text: str) -> str:
+    """User prompt — includes the OCR'd raw text as a hint when available."""
+    base = f"Extract all fields from this {kind}. Return JSON only."
+    if not raw_text:
+        return base
+    # Cap OCR text so we don't blow the context on a long bank statement.
+    hint = raw_text[:1500]
+    return (
+        f"{base}\n\n"
+        "OCR-extracted raw text (use as a hint — the image is authoritative):\n"
+        f"---\n{hint}\n---"
+    )
 
 
 def _format_checks(kind: str, fields: dict) -> Validations | None:
