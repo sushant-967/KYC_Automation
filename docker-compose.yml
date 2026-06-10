@@ -1,0 +1,60 @@
+# docker-compose.yml — local dev stack (FastAPI + Streamlit).
+#
+# Two services on a private network:
+#   api  → http://localhost:7860  (FastAPI orchestrator)
+#   ui   → http://localhost:8501  (Streamlit dashboard)
+#
+# Mode is picked from .env (copy .env.example → .env). Two modes work in Docker:
+#
+#   1. KYC_DEMO=1            — zero config. Planted Viktor + Rajesh entities,
+#                              stubbed GPU calls. The default in .env.example.
+#   2. KYC_BACKEND=groq      — real LLM behavior via Groq, local fastembed for
+#      GROQ_API_KEY=gsk_...    embeddings. Requires a Groq API key.
+#
+# The third mode (KYC_BACKEND=vllm) is NOT supported in Docker — vLLM needs the
+# AMD MI300X and ROCm; run it natively on the box instead. See README path D.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: kyc-api
+    env_file: .env
+    ports:
+      - "7860:7860"
+    volumes:
+      # Bind-mount source: live edits work without rebuilds, and SQLite +
+      # uploads land on the host so `docker compose down` doesn't wipe state.
+      # The image's COPY is shadowed but its installed deps (incl. fastembed)
+      # come from the venv in /usr/local, not this path.
+      - ./server:/repo/server
+      # OpenSanctions snapshot for `docker compose exec api python ingest.py`.
+      - ./data:/repo/data:ro
+      # fastembed model cache (~130 MB on first run) — survives rebuilds.
+      - hf_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7860/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: .
+      dockerfile: apps/ui/Dockerfile
+    container_name: kyc-ui
+    environment:
+      # UI talks to the API by its compose service name on the private network.
+      API_BASE: http://api:7860
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  hf_cache:

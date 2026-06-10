@@ -1,0 +1,38 @@
+# Cut from the build context to keep image layers lean + avoid baking secrets.
+.git/
+.gitignore
+.github/
+.claude/
+.idea/
+.vscode/
+
+# Python
+**/.venv/
+**/venv/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Runtime state — never bake into the image; mounted at runtime instead.
+server/*.db
+server/*.db-wal
+server/*.db-shm
+server/uploads/
+**/.cache/
+
+# Large datasets — also mounted, not baked.
+data/opensanctions/snapshot.jsonl
+data/opensanctions/parts/
+data/opensanctions/india/
+
+# Secrets + local env
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
