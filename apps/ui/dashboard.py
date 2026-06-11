@@ -87,7 +87,7 @@ def render_pipeline(container, statuses: dict) -> None:
 
 
 def render_results(case: dict) -> None:
-    ao = case.get("agent_outputs", {})
+    ao = case.get("agent_outputs") or {}
     risk = ao.get("risk") or {}
     decision = ao.get("decision") or {}
     explanation = ao.get("explanation") or {}
@@ -164,7 +164,7 @@ def render_results(case: dict) -> None:
             _apply_hitl(case["case_id"], "review")
         if h3.button("⛔ Escalate", use_container_width=True):
             _apply_hitl(case["case_id"], "escalate")
-    elif case.get("status") in ("approved", "rejected", "escalated") and ao.get("decision", {}).get("requires_human"):
+    elif case.get("status") in ("approved", "rejected", "escalated") and decision.get("requires_human"):
         st.success(f"Final human verdict recorded: **{case['status'].upper()}**")
 
     with st.expander("Audit log"):
