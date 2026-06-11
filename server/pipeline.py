@@ -149,7 +149,8 @@ async def _risk_node(state: GraphState):
     o = case.agent_outputs
     case.agent_outputs.risk = await _timed(
         "risk", state,
-        lambda: run_risk(o.screening, o.id_verification, o.financial_profile))
+        lambda: run_risk(o.entity_resolution, o.screening,
+                         o.id_verification, o.financial_profile))
     return {}
 
 

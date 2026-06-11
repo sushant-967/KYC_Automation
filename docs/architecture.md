@@ -131,10 +131,22 @@ small compliance touch with disproportionate signal to RBI-savvy judges.
 ### 4.3 Entity Resolution (light)
 
 - **Input:** customer record from intake + extraction.
-- **Output:** `EntityResolutionOutput { canonical_name, dob_confirmed, alias_matches, prior_cases }`.
-- **Model:** none. Deterministic name canonicalization + DOB cross-check
-  between submitted form and extracted ID. Looks up prior cases in the case
-  store.
+- **Output:** `EntityResolutionOutput { canonical_name, dob_confirmed,
+  name_matches[], name_consistent, address_confirmed, address_match_score,
+  alias_matches, prior_cases }`.
+- **Model:** none. Deterministic checks that the submitted identity is
+  consistent across every document the customer provided:
+  - **Name match (per doc):** Dice coefficient over canonicalized token sets,
+    with 1–2 char tokens matched by prefix so "Rajesh Kr." legitimately equals
+    "Rajesh Kumar". Threshold 0.70.
+  - **Address match:** same token-set scorer against the address on Aadhaar /
+    voter ID / driving licence / address proof, with road/locality stopwords
+    stripped. Threshold 0.60. `address_confirmed = None` if no address-bearing
+    doc was submitted (don't penalize what wasn't asked for).
+  - **DOB cross-check** against each extracted ID, prior-case lookup in the
+    case store.
+- Fails surface in risk as `name_mismatch` (25 pts) and `address_unverified`
+  (15 pts); raw scores ride along so HITL can override.
 
 ### 4.4 Screening — Sanctions + PEP + Adverse Media (DEEP) ★
 
@@ -195,6 +207,8 @@ pattern and keeps per-case cost low.
   - `pep_hit = +30`
   - `adverse_media = +20 × severity` (`low 0.5 / medium 0.75 / high 1.0`)
   - `id_fail = +30`
+  - `name_mismatch = +25` (any per-doc name match below 0.70)
+  - `address_unverified = +15` (submitted address ≠ address on proof docs)
   - `geography_risk = up to +10`
   - `income_implausibility = up to +10`
 

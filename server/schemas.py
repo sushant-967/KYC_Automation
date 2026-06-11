@@ -90,9 +90,23 @@ class ExtractionOutput(BaseModel):
 
 # ── Entity Resolution (§4.3) ────────────────────────────────────────────────
 
+class NameMatch(BaseModel):
+    """Per-document fuzzy match of the submitted full_name against the name
+    extracted from that document. `score` is a 0-1 token-set ratio after
+    canonicalization; `ok` is the boolean verdict against the agent threshold."""
+    doc_kind: DocumentKind
+    extracted_name: str
+    score: float = Field(ge=0, le=1)
+    ok: bool
+
+
 class EntityResolutionOutput(BaseModel):
     canonical_name: str
     dob_confirmed: bool
+    name_matches: list[NameMatch] = Field(default_factory=list)
+    name_consistent: bool = True  # all available per-doc name matches passed
+    address_confirmed: Optional[bool] = None  # None = no address proof submitted
+    address_match_score: Optional[float] = Field(default=None, ge=0, le=1)
     alias_matches: list[str] = Field(default_factory=list)
     prior_cases: list[str] = Field(default_factory=list)
 
