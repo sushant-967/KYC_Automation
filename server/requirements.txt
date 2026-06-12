@@ -1,6 +1,8 @@
 # FastAPI orchestrator (runs on the AMD box alongside vLLM)
 fastapi>=0.111
 uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+pypdf>=4.0
 pydantic>=2.7
 httpx>=0.27
 numpy>=1.26

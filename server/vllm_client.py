@@ -130,12 +130,17 @@ class VllmClient:
         return {"Authorization": f"Bearer {self.cfg.api_key}"} if self.cfg.api_key else None
 
     async def _embed_local(self, text: str | list[str]) -> tuple[list[list[float]], GpuCallMetric]:
-        """Compute embeddings on-process via fastembed ONNX (CPU, lazy-loaded)."""
-        self._ensure_local_embedder()
+        """Compute embeddings on-process via fastembed ONNX (CPU, lazy-loaded).
+        Initialization (including first-run model download) runs in a thread so
+        it never blocks the event loop."""
         inputs = [text] if isinstance(text, str) else list(text)
         started = time.perf_counter()
-        # fastembed.embed() is a generator yielding L2-normalized np.ndarray per input.
-        arrs = await asyncio.to_thread(lambda: list(self._local_embedder.embed(inputs)))
+
+        def _run():
+            self._ensure_local_embedder()
+            return list(self._local_embedder.embed(inputs))
+
+        arrs = await asyncio.to_thread(_run)
         latency = (time.perf_counter() - started) * 1000
         vectors = [a.tolist() for a in arrs]
         return vectors, GpuCallMetric(

@@ -51,8 +51,12 @@ def run_entity_resolution(
     extracted_dobs = [str(d.fields.get("dob", "")) for d in extraction.documents]
     dob_confirmed = any(_same_date(d, customer.dob) for d in extracted_dobs if d)
 
+    # Exclude the affidavit itself from per-document name matching.
+    id_docs = [d for d in extraction.documents
+               if d.kind.value != "dual_name_affidavit"]
+
     name_matches: list[NameMatch] = []
-    for d in extraction.documents:
+    for d in id_docs:
         extracted = str(d.fields.get("name", "")).strip()
         if not extracted:
             continue
@@ -65,6 +69,45 @@ def run_entity_resolution(
 
     address_confirmed, address_score = _address_match(customer.address, extraction)
 
+    # ── Remediation: dual name affidavit ────────────────────────────────────
+    affidavit_submitted = False
+    affidavit_covers = None
+    docs_required: list[str] = []
+
+    if not name_consistent:
+        affidavit_docs = [d for d in extraction.documents
+                          if d.kind.value == "dual_name_affidavit"]
+        if affidavit_docs:
+            affidavit_submitted = True
+            affidavit_covers = _affidavit_covers_discrepancy(
+                customer.full_name, name_matches, affidavit_docs[0])
+        else:
+            docs_required.append("dual_name_affidavit")
+
+    # ── Remediation: additional address proof ────────────────────────────────
+    addr_additional_submitted = False
+    addr_additional_confirmed = None
+
+    if address_confirmed is False:
+        # Check if more than one address-bearing doc was submitted; the extras
+        # are treated as the re-submitted current-address proof.
+        extra_addr = [d for d in extraction.documents
+                      if d.kind in _ADDRESS_DOCS
+                      and d.kind.value != "aadhaar"]   # Aadhaar is the original
+        if extra_addr:
+            addr_additional_submitted = True
+            best_extra = max(
+                _address_score(customer.address or "", str(d.fields.get("address", "")))
+                for d in extra_addr
+            )
+            addr_additional_confirmed = best_extra >= ADDRESS_MATCH_THRESHOLD
+            # Promote overall address_confirmed when the fresh proof matches.
+            if addr_additional_confirmed:
+                address_confirmed = True
+                address_score = round(best_extra, 3)
+        else:
+            docs_required.append("address_proof")
+
     return EntityResolutionOutput(
         canonical_name=canonical,
         dob_confirmed=dob_confirmed,
@@ -74,6 +117,11 @@ def run_entity_resolution(
         address_match_score=address_score,
         alias_matches=[],
         prior_cases=prior_case_lookup(canonical),
+        name_affidavit_submitted=affidavit_submitted,
+        name_affidavit_covers_discrepancy=affidavit_covers,
+        address_additional_proof_submitted=addr_additional_submitted,
+        address_additional_proof_confirmed=addr_additional_confirmed,
+        documents_required=docs_required,
     )
 
 
@@ -162,3 +210,46 @@ def _same_date(a: str, b: str) -> bool:
         return date.fromisoformat(a[:10]) == date.fromisoformat(b[:10])
     except ValueError:
         return a.strip() == b.strip()
+
+
+# ── Dual name affidavit verification ────────────────────────────────────────
+
+def _affidavit_covers_discrepancy(
+    submitted_name: str,
+    name_matches: list,
+    affidavit_doc,
+) -> bool:
+    """Return True if the affidavit explicitly links the submitted name to every
+    failing document name.  The extraction agent pulls `name_1` and `name_2`
+    (or a `names` list) from the affidavit; we verify both ends are covered."""
+    fields = affidavit_doc.fields or {}
+
+    # Collect names the affidavit declares as equivalent.
+    affidavit_names: list[str] = []
+    if "names" in fields and isinstance(fields["names"], list):
+        affidavit_names = [str(n) for n in fields["names"]]
+    else:
+        for key in ("name_1", "name_2", "name1", "name2", "name"):
+            val = fields.get(key)
+            if val:
+                affidavit_names.append(str(val))
+
+    if not affidavit_names:
+        return False
+
+    # Submitted name must appear in the affidavit.
+    submitted_covered = any(
+        _name_score(submitted_name, n) >= NAME_MATCH_THRESHOLD
+        for n in affidavit_names
+    )
+    if not submitted_covered:
+        return False
+
+    # Every failing document name must also appear in the affidavit.
+    failing_names = [m.extracted_name for m in name_matches if not m.ok]
+    for fname in failing_names:
+        if not any(_name_score(fname, n) >= NAME_MATCH_THRESHOLD
+                   for n in affidavit_names):
+            return False
+
+    return True

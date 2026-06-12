@@ -42,13 +42,40 @@ def run_risk(entity: EntityResolutionOutput, screening: ScreeningOutput,
                                  value="fail", contribution=W["id_fail"]))
     if not entity.name_consistent:
         failing = [f"{m.doc_kind.value}:{m.score:.2f}" for m in entity.name_matches if not m.ok]
-        c.append(RiskContributor(signal="name_mismatch", weight=W["name_mismatch"],
-                                 value=failing, contribution=W["name_mismatch"]))
+        if entity.name_affidavit_covers_discrepancy:
+            # Affidavit submitted and verified — residual 5-pt flag for audit trail.
+            c.append(RiskContributor(signal="name_mismatch_affidavit_resolved",
+                                     weight=W["name_mismatch"], value=failing,
+                                     contribution=5))
+        elif entity.name_affidavit_submitted:
+            # Affidavit submitted but doesn't cover all failing names — partial credit.
+            c.append(RiskContributor(signal="name_mismatch_affidavit_insufficient",
+                                     weight=W["name_mismatch"], value=failing,
+                                     contribution=W["name_mismatch"] * 0.6))
+        else:
+            # No affidavit at all — full penalty.
+            c.append(RiskContributor(signal="name_mismatch", weight=W["name_mismatch"],
+                                     value=failing, contribution=W["name_mismatch"]))
+
     # Address present on form but no submitted proof confirmed it.
     if entity.address_confirmed is False:
-        c.append(RiskContributor(signal="address_unverified", weight=W["address_unverified"],
-                                 value=entity.address_match_score,
-                                 contribution=W["address_unverified"]))
+        if entity.address_additional_proof_confirmed:
+            # Additional proof submitted and matched — residual 3-pt audit flag.
+            c.append(RiskContributor(signal="address_resolved_by_additional_proof",
+                                     weight=W["address_unverified"],
+                                     value=entity.address_match_score, contribution=3))
+        elif entity.address_additional_proof_submitted:
+            # Additional proof submitted but still doesn't match — partial.
+            c.append(RiskContributor(signal="address_additional_proof_mismatch",
+                                     weight=W["address_unverified"],
+                                     value=entity.address_match_score,
+                                     contribution=W["address_unverified"] * 0.7))
+        else:
+            # No additional proof provided — full penalty.
+            c.append(RiskContributor(signal="address_unverified",
+                                     weight=W["address_unverified"],
+                                     value=entity.address_match_score,
+                                     contribution=W["address_unverified"]))
 
     geo = fin.geography_risk * W["geo_risk_max"]
     if geo > 0:

@@ -219,6 +219,24 @@ async def run_pipeline(state: CaseState, vllm: VllmClient, io: PipelineIO) -> Ca
     initial: GraphState = {"case": state, "vllm": vllm, "io": io, "gpu": []}
     final = await _GRAPH.ainvoke(initial)
 
+    state.metrics.per_gpu_call.extend(final.get("gpu", []))
+    state.metrics.end_to_end_ms = (time.perf_counter() - t0) * 1000
+
+    # Pause for missing documents — skip the decision step entirely.
+    er = state.agent_outputs.entity_resolution
+    if er and er.documents_required:
+        state.status = "awaiting_documents"
+        io.emit("pipeline", state.status, {"documents_required": er.documents_required})
+        return state
+
+    # Pause for invalid PAN / Aadhaar — compliance officer must decide.
+    idv = state.agent_outputs.id_verification
+    id_issues = _id_issues(idv)
+    if id_issues:
+        state.status = "awaiting_id_review"
+        io.emit("pipeline", state.status, {"id_issues": id_issues})
+        return state
+
     # Terminal status — review/escalate pause for a human verdict.
     decision = state.agent_outputs.decision
     if decision.requires_human:
@@ -228,10 +246,24 @@ async def run_pipeline(state: CaseState, vllm: VllmClient, io: PipelineIO) -> Ca
     else:
         state.status = "escalated"
 
-    state.metrics.per_gpu_call.extend(final.get("gpu", []))
-    state.metrics.end_to_end_ms = (time.perf_counter() - t0) * 1000
     io.emit("pipeline", state.status, None)
     return state
+
+
+def _id_issues(idv) -> list[str]:
+    """Return human-readable descriptions of any failed ID format checks."""
+    if not idv:
+        return []
+    issues = []
+    if idv.pan_format_valid is False:
+        issues.append("PAN number format is invalid (expected ABCDE1234F)")
+    if idv.aadhaar_format_valid is False:
+        issues.append("Aadhaar number failed Verhoeff checksum — possible transcription error or forgery")
+    if idv.mrz_valid is False:
+        issues.append("Passport MRZ checksum failed — document may be tampered")
+    if idv.expiry_ok is False:
+        issues.append("Passport is expired")
+    return issues
 
 
 def _jsonable(v: object):

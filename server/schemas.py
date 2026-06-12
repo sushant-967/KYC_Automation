@@ -31,6 +31,7 @@ class DocumentKind(str, Enum):
     passport = "passport"
     driving_license = "driving_license"
     address_proof = "address_proof"
+    dual_name_affidavit = "dual_name_affidavit"  # notarized doc bridging two name variants
 
 
 AgentName = Literal[
@@ -109,6 +110,12 @@ class EntityResolutionOutput(BaseModel):
     address_match_score: Optional[float] = Field(default=None, ge=0, le=1)
     alias_matches: list[str] = Field(default_factory=list)
     prior_cases: list[str] = Field(default_factory=list)
+    # Remediation tracking
+    name_affidavit_submitted: bool = False          # dual_name_affidavit doc was present
+    name_affidavit_covers_discrepancy: Optional[bool] = None  # affidavit bridges the mismatch
+    address_additional_proof_submitted: bool = False
+    address_additional_proof_confirmed: Optional[bool] = None
+    documents_required: list[str] = Field(default_factory=list)  # what the customer still owes
 
 
 # ── Screening (§4.4) — Sanctions + PEP + Adverse Media ──────────────────────
@@ -151,6 +158,8 @@ class IDVerificationOutput(BaseModel):
     mrz_valid: Optional[bool] = None
     expiry_ok: Optional[bool] = None
     face_match_score: Optional[float] = Field(default=None, ge=0, le=1)
+    pan_format_valid: Optional[bool] = None       # PAN regex ^[A-Z]{5}[0-9]{4}[A-Z]$
+    aadhaar_format_valid: Optional[bool] = None   # Verhoeff checksum over 12 digits
 
 
 class FinancialProfileOutput(BaseModel):
@@ -190,7 +199,7 @@ class ExplanationOutput(BaseModel):
 
 # ── Decision (§4.9) ─────────────────────────────────────────────────────────
 
-Decision = Literal["approve", "review", "escalate"]
+Decision = Literal["approve", "review", "escalate", "reject"]
 
 
 class DecisionOutput(BaseModel):
@@ -225,7 +234,8 @@ class GpuCallMetric(BaseModel):
 # ── Case state (§5) — the single document persisted per case ────────────────
 
 CaseStatus = Literal[
-    "intake", "running", "awaiting_human", "approved", "rejected", "escalated",
+    "intake", "running", "awaiting_human", "awaiting_documents",
+    "awaiting_id_review", "approved", "rejected", "escalated",
 ]
 
 

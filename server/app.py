@@ -2,9 +2,11 @@
 app.py — FastAPI orchestrator entrypoint (§3, single-box edition).
 
 Routes:
+  POST /api/upload            → upload a document file, returns {file_id}
   POST /api/cases             → create a case, kick off the pipeline, return {case_id}
   GET  /api/cases/:id         → current CaseState
   GET  /api/cases/:id/stream  → SSE stream of pipeline events
+  POST /api/cases/:id/documents → add remediation docs (awaiting_documents state)
   POST /api/cases/:id/decide  → human verdict (approve | review | escalate)
   GET  /api/cases             → list case ids
   GET  /healthz               → liveness
@@ -22,11 +24,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from schemas import (AuditEvent, CaseMetrics, CaseState, HumanDecision, Submission)
+from schemas import (AgentOutputs, AuditEvent, CaseMetrics, CaseState, DocumentRef, HumanDecision, Submission)
 from store import CaseStore
 from screening_index import ScreeningIndex
 from vllm_client import VllmClient, make_vllm_client
@@ -78,6 +80,17 @@ async def _startup() -> None:
     global hub
     hub = Hub()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    # Pre-warm the local fastembed model in a background task so the first
+    # screening call doesn't pay the ~130 MB download latency.
+    if hasattr(hub.vllm, "cfg") and hub.vllm.cfg.local_embedder_model:
+        asyncio.create_task(_prewarm_embedder())
+
+
+async def _prewarm_embedder() -> None:
+    try:
+        await hub.vllm.embed("warmup")
+    except Exception:
+        pass  # non-fatal; first real call will still work
 
 
 @app.on_event("shutdown")
@@ -94,6 +107,18 @@ def _now() -> str:
 @app.get("/healthz")
 async def healthz() -> dict:
     return {"ok": True, "demo": hub.demo, "entities_loaded": len(hub.index.rows)}
+
+
+@app.post("/api/upload")
+async def upload_document(file: UploadFile = File(...)) -> dict:
+    """Upload a single KYC document image. Returns a file_id to reference in submission."""
+    ext = (file.filename or "doc").rsplit(".", 1)[-1].lower()
+    allowed = {"png", "jpg", "jpeg", "pdf"}
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail=f"file type .{ext} not allowed")
+    file_id = f"{uuid.uuid4().hex[:12]}.{ext}"
+    (UPLOAD_DIR / file_id).write_bytes(await file.read())
+    return {"file_id": file_id}
 
 
 @app.get("/api/cases")
@@ -155,13 +180,67 @@ async def stream_case(case_id: str) -> StreamingResponse:
                              headers={"cache-control": "no-cache"})
 
 
+@app.post("/api/cases/{case_id}/documents")
+async def add_documents(case_id: str, request: Request) -> JSONResponse:
+    """Accept additional documents (e.g. dual_name_affidavit, fresh address_proof)
+    for a case that is paused in awaiting_documents status, then re-run the pipeline."""
+    state = hub.store.get(case_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="no such case")
+    if state.status != "awaiting_documents":
+        raise HTTPException(status_code=409,
+                            detail=f"case is '{state.status}', not awaiting_documents")
+
+    raw = await request.json()
+    new_docs: list[dict] = raw.get("documents", [])
+    if not new_docs:
+        raise HTTPException(status_code=400, detail="documents list required")
+
+    # Save uploaded files and append DocumentRefs to the case.
+    for doc in new_docs:
+        file_id: str = doc.get("file_id", "")
+        b64: str = doc.get("data", "")
+        if file_id and b64:
+            import base64 as _b64
+            (UPLOAD_DIR / file_id).write_bytes(_b64.b64decode(b64))
+        try:
+            ref = DocumentRef.model_validate({"kind": doc["kind"], "file_id": doc["file_id"]})
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"invalid document ref: {e}")
+        state.documents.append(ref)
+
+    # Reset agent outputs so the pipeline re-runs cleanly.
+    state.agent_outputs = AgentOutputs(intake=state.agent_outputs.intake)
+    state.metrics = CaseMetrics()
+    hub.store.save(state)
+    _audit(state, "do", "documents_added", {"added": [d["kind"] for d in new_docs]})
+
+    asyncio.create_task(_execute(case_id))
+    return JSONResponse({"case_id": case_id, "status": "running"})
+
+
 @app.post("/api/cases/{case_id}/decide")
 async def decide_case(case_id: str, verdict: HumanDecision) -> dict:
     state = hub.store.get(case_id)
     if not state:
         raise HTTPException(status_code=404, detail="no such case")
-    state.status = ("approved" if verdict.decision == "approve"
-                    else "escalated" if verdict.decision == "escalate" else "rejected")
+
+    if state.status == "awaiting_id_review":
+        if verdict.decision == "approve":
+            # Officer accepts the invalid format — apply the computed decision.
+            dec = state.agent_outputs.decision
+            if dec:
+                state.status = "approved" if dec.decision == "approve" else "escalated"
+            else:
+                state.status = "approved"
+        elif verdict.decision == "reject":
+            state.status = "rejected"
+        else:
+            state.status = "escalated"
+    else:
+        state.status = ("approved" if verdict.decision == "approve"
+                        else "escalated" if verdict.decision == "escalate" else "rejected")
+
     hub.store.save(state)
     _audit(state, "human", "human_decision", verdict.model_dump())
     hub.publish(case_id, {"agent": "human", "status": state.status, "payload": verdict.model_dump()})
@@ -170,7 +249,7 @@ async def decide_case(case_id: str, verdict: HumanDecision) -> dict:
 
 # ── Pipeline execution ──────────────────────────────────────────────────────
 
-_TERMINAL = {"approved", "rejected", "escalated", "awaiting_human"}
+_TERMINAL = {"approved", "rejected", "escalated", "awaiting_human", "awaiting_documents", "awaiting_id_review"}
 
 
 async def _execute(case_id: str) -> None:
@@ -199,13 +278,53 @@ async def _execute(case_id: str) -> None:
         hub.store.save(state)
 
 
+_MIME = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+         "gif": "image/gif", "webp": "image/webp"}
+
 async def _load_image(file_id: str) -> str:
-    """Resolve a document file_id to a data: URL. Demo: read from UPLOAD_DIR."""
+    """Resolve a document file_id to a data: URL (PNG) for the vision model.
+    PDFs are converted to a PNG image by rendering their extracted text onto a
+    white canvas with PIL — no native PDF renderer needed."""
     path = UPLOAD_DIR / file_id
-    if path.exists():
-        b = base64.b64encode(path.read_bytes()).decode()
-        return f"data:image/png;base64,{b}"
-    return f"data:image/png;base64,"  # placeholder; extraction will low-confidence
+    if not path.exists():
+        return "data:image/png;base64,"  # placeholder
+
+    ext = path.suffix.lstrip(".").lower()
+
+    if ext == "pdf":
+        return _pdf_to_image_url(path)
+
+    mime = _MIME.get(ext, "image/png")
+    b = base64.b64encode(path.read_bytes()).decode()
+    return f"data:{mime};base64,{b}"
+
+
+def _pdf_to_image_url(path) -> str:
+    """Extract text from a PDF and render it as a PNG data URL using PIL."""
+    import io as _io
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(str(path))
+        text = "\n".join(
+            page.extract_text() or "" for page in reader.pages
+        ).strip() or "(no text extracted from PDF)"
+    except Exception:
+        text = "(could not read PDF)"
+
+    from PIL import Image, ImageDraw, ImageFont
+    W, H = 900, max(600, 30 * (text.count("\n") + 5))
+    img = Image.new("RGB", (W, H), "#FFFFFF")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 18)
+    except Exception:
+        font = ImageFont.load_default()
+    draw.text((20, 20), text, fill="#111111", font=font)
+
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{b64}"
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────

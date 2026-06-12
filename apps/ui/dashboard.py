@@ -10,6 +10,7 @@ front-ends. Run the API separately (server/run.sh); point this at it via API_BAS
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 from pathlib import Path
@@ -32,13 +33,20 @@ AGENTS = [
     ("explanation", "Explainability ★"),
     ("decision", "Decision"),
 ]
-TERMINAL = {"approved", "rejected", "escalated", "awaiting_human", "error"}
+TERMINAL = {"approved", "rejected", "escalated", "awaiting_human", "awaiting_documents", "awaiting_id_review", "error"}
 ICON = {"pending": "⚪", "running": "🟡", "done": "✅"}
 DECISION_STYLE = {
     "approve": ("APPROVE", "#16a34a"), "approved": ("APPROVED", "#16a34a"),
     "review": ("HUMAN REVIEW", "#d97706"), "awaiting_human": ("AWAITING HUMAN", "#d97706"),
     "escalate": ("ESCALATE", "#dc2626"), "escalated": ("ESCALATED", "#dc2626"),
     "rejected": ("REJECTED", "#dc2626"),
+    "awaiting_documents": ("DOCUMENTS REQUIRED", "#7c3aed"),
+    "awaiting_id_review": ("ID REVIEW REQUIRED", "#dc6803"),
+}
+
+DOC_LABELS = {
+    "dual_name_affidavit": "Dual Name Affidavit (notarized)",
+    "address_proof": "Current Address Proof (utility bill / bank statement < 3 months)",
 }
 
 st.set_page_config(page_title="Agentic KYC", page_icon="🛡️", layout="wide")
@@ -51,6 +59,15 @@ def api_health() -> dict | None:
         return httpx.get(f"{API}/healthz", timeout=3).json()
     except Exception:
         return None
+
+
+def upload_file(data: bytes, filename: str) -> str:
+    """Upload a document to the API and return its file_id."""
+    r = httpx.post(f"{API}/api/upload",
+                   files={"file": (filename, io.BytesIO(data), "application/octet-stream")},
+                   timeout=30)
+    r.raise_for_status()
+    return r.json()["file_id"]
 
 
 def create_case(submission: dict) -> str:
@@ -66,6 +83,12 @@ def get_case(cid: str) -> dict:
 def decide_case(cid: str, decision: str, note: str = "") -> dict:
     r = httpx.post(f"{API}/api/cases/{cid}/decide",
                    json={"decision": decision, "reviewer": "dashboard", "note": note}, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def submit_documents(cid: str, docs: list[dict]) -> dict:
+    r = httpx.post(f"{API}/api/cases/{cid}/documents", json={"documents": docs}, timeout=15)
     r.raise_for_status()
     return r.json()
 
@@ -152,6 +175,64 @@ def render_results(case: dict) -> None:
                             for k, v in per_agent.items()])
         st.bar_chart(dfm.set_index("agent"), color="#2563eb")
 
+    # Awaiting ID review — invalid PAN / Aadhaar / Passport
+    idv = ao.get("id_verification") or {}
+    if case.get("status") == "awaiting_id_review":
+        st.divider()
+        st.subheader("ID Document Review Required")
+        st.error("One or more identity documents failed format validation. "
+                 "A compliance officer must decide how to proceed.")
+
+        # Collect which checks failed
+        if idv.get("pan_format_valid") is False:
+            st.warning("**PAN** — format invalid (expected 5 letters + 4 digits + 1 letter, e.g. ABCDE1234F)")
+        if idv.get("aadhaar_format_valid") is False:
+            st.warning("**Aadhaar** — Verhoeff checksum failed (12-digit number is incorrect or tampered)")
+        if idv.get("mrz_valid") is False:
+            st.warning("**Passport MRZ** — checksum failed (machine-readable zone may be tampered)")
+        if idv.get("expiry_ok") is False:
+            st.warning("**Passport** — document is expired")
+
+        st.caption("Risk score and full pipeline analysis are still shown below for reference.")
+        st.divider()
+        c1, c2, c3 = st.columns(3)
+        if c1.button("Accept & Proceed", use_container_width=True, type="primary",
+                     help="Override the format issue — apply the computed risk decision"):
+            _apply_hitl(case["case_id"], "approve")
+        if c2.button("Reject Case", use_container_width=True,
+                     help="Document is invalid/fake — reject the KYC application"):
+            _apply_hitl(case["case_id"], "reject")
+        if c3.button("Escalate", use_container_width=True,
+                     help="Flag for senior compliance review"):
+            _apply_hitl(case["case_id"], "escalate")
+
+    # Awaiting documents — show what's needed + upload UI
+    er = ao.get("entity_resolution") or {}
+    docs_required = er.get("documents_required", [])
+    if case.get("status") == "awaiting_documents" and docs_required:
+        st.divider()
+        st.subheader("Action Required — Additional Documents")
+        for doc_kind in docs_required:
+            label = DOC_LABELS.get(doc_kind, doc_kind.replace("_", " ").title())
+            st.warning(f"**{label}** is required to proceed.")
+            uploaded = st.file_uploader(f"Upload {label}", type=["png", "jpg", "jpeg", "pdf"],
+                                        key=f"upload_{doc_kind}_{case['case_id']}")
+            if uploaded and st.button(f"Submit {label}", key=f"submit_{doc_kind}_{case['case_id']}"):
+                import base64 as _b64
+                b64 = _b64.b64encode(uploaded.read()).decode()
+                ext = uploaded.name.rsplit(".", 1)[-1].lower()
+                file_id = f"{case['case_id'][:8]}-{doc_kind}.{ext}"
+                submit_documents(case["case_id"], [{"kind": doc_kind, "file_id": file_id, "data": b64}])
+                st.session_state.case = get_case(case["case_id"])
+                st.rerun()
+        # Show what was already verified
+        if er.get("name_affidavit_submitted"):
+            covers = er.get("name_affidavit_covers_discrepancy")
+            st.info(f"Dual Name Affidavit received — {'covers discrepancy' if covers else 'does NOT cover all name variants'}.")
+        if er.get("address_additional_proof_submitted"):
+            confirmed = er.get("address_additional_proof_confirmed")
+            st.info(f"Additional address proof received — {'address confirmed' if confirmed else 'address still does not match'}.")
+
     # HITL
     if decision.get("requires_human") and case.get("status") == "awaiting_human":
         st.divider()
@@ -185,22 +266,89 @@ st.caption(f"Multi-agent Customer Due Diligence · backend API: `{API}`")
 
 health = api_health()
 with st.sidebar:
-    st.header("New case")
+    st.header("New KYC Case")
     if health:
         st.success(f"API up · {'DEMO' if health.get('demo') else 'LIVE'} mode · "
-                   f"{health.get('entities_loaded',0)} screening entities")
+                   f"{health.get('entities_loaded',0)} entities")
     else:
-        st.error(f"API unreachable at {API}\nStart it: `server/run.sh`")
+        st.error(f"API unreachable at {API}")
 
-    personas = sorted(p.name for p in PERSONA_DIR.iterdir() if p.is_dir()) if PERSONA_DIR.exists() else []
-    choice = st.selectbox("Persona", personas, index=0 if personas else None)
+    tab_demo, tab_manual = st.tabs(["Demo Personas", "Manual KYC"])
     submission = None
-    if choice:
-        data = json.load(open(PERSONA_DIR / choice / "persona.json"))
-        submission = data.get("submission", data)
-        with st.expander("Submission payload"):
-            st.json(submission)
-    run = st.button("▶ Run KYC case", type="primary", use_container_width=True, disabled=not (health and submission))
+
+    # ── Tab 1: pre-built personas ────────────────────────────────────────────
+    with tab_demo:
+        personas = sorted(p.name for p in PERSONA_DIR.iterdir() if p.is_dir()) if PERSONA_DIR.exists() else []
+        choice = st.selectbox("Persona", personas, index=0 if personas else None)
+        if choice:
+            data = json.load(open(PERSONA_DIR / choice / "persona.json"))
+            submission = data.get("submission", data)
+            with st.expander("Payload"):
+                st.json(submission)
+        run = st.button("▶ Run Demo Case", type="primary", use_container_width=True,
+                        disabled=not (health and submission), key="run_demo")
+
+    # ── Tab 2: manual upload ─────────────────────────────────────────────────
+    with tab_manual:
+        st.caption("Fill in customer details and upload identity documents.")
+
+        m_name    = st.text_input("Full name", placeholder="As on Aadhaar / PAN")
+        m_dob     = st.text_input("Date of birth", placeholder="YYYY-MM-DD")
+        m_address = st.text_area("Current address", height=80)
+        m_nat     = st.selectbox("Nationality", ["india", "usa", "uk", "uae", "cyprus", "other"])
+        m_income  = st.number_input("Declared annual income (INR)", min_value=0, step=10000)
+        m_emp     = st.text_input("Employment", placeholder="e.g. Software Engineer, TCS")
+
+        st.markdown("**Upload documents** (at least one required)")
+        DOC_TYPES = [
+            ("aadhaar",           "Aadhaar Card"),
+            ("pan",               "PAN Card"),
+            ("passport",          "Passport"),
+            ("voter_id",          "Voter ID"),
+            ("driving_license",   "Driving Licence"),
+            ("address_proof",     "Address Proof (utility bill etc.)"),
+            ("dual_name_affidavit", "Dual Name Affidavit"),
+        ]
+        uploaded_docs: list[tuple[str, bytes, str]] = []  # (kind, bytes, filename)
+        for kind, label in DOC_TYPES:
+            f = st.file_uploader(label, type=["png", "jpg", "jpeg", "pdf"], key=f"doc_{kind}")
+            if f:
+                uploaded_docs.append((kind, f.read(), f.name))
+
+        run_manual = st.button("▶ Submit KYC Case", type="primary", use_container_width=True,
+                               disabled=not (health and m_name and m_dob and uploaded_docs),
+                               key="run_manual")
+
+        if run_manual and m_name and m_dob and uploaded_docs:
+            with st.spinner("Uploading documents…"):
+                doc_refs = []
+                for kind, data_bytes, fname in uploaded_docs:
+                    try:
+                        fid = upload_file(data_bytes, fname)
+                        doc_refs.append({"kind": kind, "file_id": fid})
+                    except Exception as e:
+                        st.error(f"Upload failed for {kind}: {e}")
+                        doc_refs = []
+                        break
+
+            if doc_refs:
+                submission = {
+                    "customer": {
+                        "full_name": m_name,
+                        "dob": m_dob,
+                        "address": m_address or None,
+                        "nationality": m_nat,
+                        "declared_income": float(m_income) if m_income else None,
+                        "declared_employment": m_emp or None,
+                    },
+                    "documents": doc_refs,
+                }
+                run = True   # fall through to the shared pipeline runner below
+            else:
+                run = False
+    # run is set by either tab above; if neither tab triggered it, default False
+    if "run" not in dir():
+        run = False
 
 pipeline_box = st.empty()
 
