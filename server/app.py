@@ -212,6 +212,7 @@ async def add_documents(case_id: str, request: Request) -> JSONResponse:
     # Reset agent outputs so the pipeline re-runs cleanly.
     state.agent_outputs = AgentOutputs(intake=state.agent_outputs.intake)
     state.metrics = CaseMetrics()
+    state.status = "running"   # move out of awaiting_documents before SSE replay
     hub.store.save(state)
     _audit(state, "do", "documents_added", {"added": [d["kind"] for d in new_docs]})
 
@@ -230,7 +231,13 @@ async def decide_case(case_id: str, verdict: HumanDecision) -> dict:
             # Officer accepts the invalid format — apply the computed decision.
             dec = state.agent_outputs.decision
             if dec:
-                state.status = "approved" if dec.decision == "approve" else "escalated"
+                if dec.decision == "approve":
+                    state.status = "approved"
+                elif dec.requires_human:
+                    # Medium-risk case: officer still needs to review the risk
+                    state.status = "awaiting_human"
+                else:
+                    state.status = "escalated"
             else:
                 state.status = "approved"
         elif verdict.decision == "reject":

@@ -25,6 +25,7 @@ from schemas import (CustomerInput, DocumentKind, EntityResolutionOutput,
 
 NAME_MATCH_THRESHOLD = 0.70
 ADDRESS_MATCH_THRESHOLD = 0.60
+MAX_AFFIDAVIT_RETRIES = 2   # customer gets 2 attempts to submit a valid affidavit
 
 # Address-noise tokens that carry no identity signal — strip before scoring.
 _ADDRESS_STOPWORDS = {
@@ -72,15 +73,26 @@ def run_entity_resolution(
     # ── Remediation: dual name affidavit ────────────────────────────────────
     affidavit_submitted = False
     affidavit_covers = None
+    affidavit_attempts = 0
+    affidavit_retries_exhausted = False
     docs_required: list[str] = []
 
     if not name_consistent:
         affidavit_docs = [d for d in extraction.documents
                           if d.kind.value == "dual_name_affidavit"]
+        affidavit_attempts = len(affidavit_docs)
         if affidavit_docs:
             affidavit_submitted = True
+            # Use the most recently submitted affidavit for the check.
             affidavit_covers = _affidavit_covers_discrepancy(
-                customer.full_name, name_matches, affidavit_docs[0])
+                customer.full_name, name_matches, affidavit_docs[-1])
+            if not affidavit_covers:
+                if affidavit_attempts < MAX_AFFIDAVIT_RETRIES:
+                    # Still has retries — pause and ask for a better affidavit.
+                    docs_required.append("dual_name_affidavit")
+                else:
+                    # Retries exhausted — proceed with full penalty.
+                    affidavit_retries_exhausted = True
         else:
             docs_required.append("dual_name_affidavit")
 
@@ -119,6 +131,8 @@ def run_entity_resolution(
         prior_cases=prior_case_lookup(canonical),
         name_affidavit_submitted=affidavit_submitted,
         name_affidavit_covers_discrepancy=affidavit_covers,
+        affidavit_attempts=affidavit_attempts,
+        affidavit_retries_exhausted=affidavit_retries_exhausted,
         address_additional_proof_submitted=addr_additional_submitted,
         address_additional_proof_confirmed=addr_additional_confirmed,
         documents_required=docs_required,

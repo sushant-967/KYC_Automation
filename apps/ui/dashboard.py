@@ -162,6 +162,33 @@ def render_results(case: dict) -> None:
             with st.expander(f"{dot} {card.get('title','')}  ·  {card.get('source','')}"):
                 st.write(card.get("finding", ""))
 
+        # ID Verification detail — always visible so the officer sees what passed/failed
+        idv = ao.get("id_verification") or {}
+        if idv:
+            st.subheader("ID Verification")
+            _IDV_CHECKS = [
+                ("aadhaar_format_valid", "Aadhaar Verhoeff checksum",
+                 "12-digit number passed checksum", "Verhoeff checksum failed — digit may be misread or tampered"),
+                ("pan_format_valid",     "PAN format",
+                 "Regex ABCDE1234F valid",           "Invalid format — expected 5 letters + 4 digits + 1 letter"),
+                ("mrz_valid",            "Passport MRZ checksum",
+                 "Machine-readable zone valid",      "MRZ checksum failed — document may be tampered"),
+                ("expiry_ok",            "Passport expiry",
+                 "Document is valid (not expired)",  "Document is expired"),
+            ]
+            for field, label, ok_msg, fail_msg in _IDV_CHECKS:
+                val = idv.get(field)
+                if val is None:
+                    continue   # check not applicable (doc type not submitted)
+                if val:
+                    st.markdown(f"✅ **{label}** — {ok_msg}")
+                else:
+                    st.markdown(f"❌ **{label}** — {fail_msg}")
+            auth = idv.get("doc_authenticity")
+            if auth:
+                color_map = {"pass": "✅", "fail": "❌", "unknown": "❓"}
+                st.markdown(f"{color_map.get(auth,'❓')} **Overall authenticity** — {auth.upper()}")
+
     # Metrics
     st.divider()
     st.subheader("Metrics")
@@ -222,13 +249,36 @@ def render_results(case: dict) -> None:
                 b64 = _b64.b64encode(uploaded.read()).decode()
                 ext = uploaded.name.rsplit(".", 1)[-1].lower()
                 file_id = f"{case['case_id'][:8]}-{doc_kind}.{ext}"
-                submit_documents(case["case_id"], [{"kind": doc_kind, "file_id": file_id, "data": b64}])
-                st.session_state.case = get_case(case["case_id"])
+                cid = case["case_id"]
+                with st.spinner("Submitting document — re-running pipeline…"):
+                    submit_documents(cid, [{"kind": doc_kind, "file_id": file_id, "data": b64}])
+                    # Re-subscribe and wait for the pipeline to reach a terminal state.
+                    # (The server now sets status="running" before we subscribe, so the
+                    # replay event won't be the stale "awaiting_documents" terminal.)
+                    try:
+                        with httpx.stream("GET", f"{API}/api/cases/{cid}/stream",
+                                          timeout=120) as sse:
+                            for line in sse.iter_lines():
+                                if not line or not line.startswith("data: "):
+                                    continue
+                                ev = json.loads(line[6:])
+                                if ev.get("agent") == "pipeline" and ev.get("status") in TERMINAL:
+                                    break
+                    except Exception:
+                        pass
+                st.session_state.case = get_case(cid)
                 st.rerun()
         # Show what was already verified
         if er.get("name_affidavit_submitted"):
             covers = er.get("name_affidavit_covers_discrepancy")
-            st.info(f"Dual Name Affidavit received — {'covers discrepancy' if covers else 'does NOT cover all name variants'}.")
+            attempts = er.get("affidavit_attempts", 1)
+            exhausted = er.get("affidavit_retries_exhausted", False)
+            if covers:
+                st.success("Dual Name Affidavit received — covers discrepancy.")
+            elif exhausted:
+                st.error(f"Dual Name Affidavit submitted {attempts} time(s) but did not cover all name variants. Full penalty applied.")
+            else:
+                st.warning(f"Dual Name Affidavit (attempt {attempts}) does NOT cover all name variants — please resubmit.")
         if er.get("address_additional_proof_submitted"):
             confirmed = er.get("address_additional_proof_confirmed")
             st.info(f"Additional address proof received — {'address confirmed' if confirmed else 'address still does not match'}.")

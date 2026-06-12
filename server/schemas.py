@@ -113,6 +113,8 @@ class EntityResolutionOutput(BaseModel):
     # Remediation tracking
     name_affidavit_submitted: bool = False          # dual_name_affidavit doc was present
     name_affidavit_covers_discrepancy: Optional[bool] = None  # affidavit bridges the mismatch
+    affidavit_attempts: int = 0                     # how many affidavits have been submitted
+    affidavit_retries_exhausted: bool = False        # True when max retries reached and affidavit still fails
     address_additional_proof_submitted: bool = False
     address_additional_proof_confirmed: Optional[bool] = None
     documents_required: list[str] = Field(default_factory=list)  # what the customer still owes

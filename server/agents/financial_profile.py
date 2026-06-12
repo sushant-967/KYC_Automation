@@ -1,3 +1,4 @@
+
 """
 Financial Profile (light, §4.6) — rules + lookup tables, no ML.
 Documented heuristics so the score stays explainable.

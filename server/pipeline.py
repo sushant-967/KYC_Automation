@@ -172,7 +172,9 @@ async def _explanation_node(state: GraphState):
 async def _decision_node(state: GraphState):
     case = state["case"]
     case.agent_outputs.decision = await _timed(
-        "decision", state, lambda: run_decision(case.agent_outputs.risk))
+        "decision", state, lambda: run_decision(
+            case.agent_outputs.risk,
+            case.agent_outputs.entity_resolution))
     return {}
 
 
@@ -251,14 +253,19 @@ async def run_pipeline(state: CaseState, vllm: VllmClient, io: PipelineIO) -> Ca
 
 
 def _id_issues(idv) -> list[str]:
-    """Return human-readable descriptions of any failed ID format checks."""
+    """Return hard-stop ID issues that require HITL.
+
+    Aadhaar Verhoeff failure is intentionally excluded — vision models often
+    misread digits from low-quality scans, producing false positives.  It is
+    scored as a risk signal in risk.py instead of blocking the pipeline.
+    Only structurally unambiguous failures (PAN regex, passport MRZ/expiry)
+    warrant a hard stop.
+    """
     if not idv:
         return []
     issues = []
     if idv.pan_format_valid is False:
         issues.append("PAN number format is invalid (expected ABCDE1234F)")
-    if idv.aadhaar_format_valid is False:
-        issues.append("Aadhaar number failed Verhoeff checksum — possible transcription error or forgery")
     if idv.mrz_valid is False:
         issues.append("Passport MRZ checksum failed — document may be tampered")
     if idv.expiry_ok is False:

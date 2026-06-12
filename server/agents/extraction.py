@@ -4,8 +4,7 @@ Extraction Agent (DEEP ★, §4.2) — Qwen2.5-VL-72B via vLLM :8000.
 Per document: an optional PaddleOCR pre-pass produces raw text; that text plus
 the image are sent to the vision LLM with a per-doc-kind JSON-schema prompt;
 the LLM returns structured fields + confidence; deterministic format checks
-run (PAN regex, MRZ checksum, Aadhaar Verhoeff); Aadhaar is MASKED before it
-propagates downstream.
+run (PAN regex, MRZ checksum, Aadhaar Verhoeff).
 
 If PaddleOCR isn't installed, `ocr.extract_text` silently returns "" and the
 vision LLM does extraction on the image alone — no behavior change for users
@@ -55,11 +54,11 @@ async def run_extraction(
         fields = result.json if isinstance(result.json, dict) else {}
         out.append(ExtractedDocument(
             kind=doc.kind,
-            fields=_mask_sensitive(doc.kind.value, fields),
+            fields=fields,
             confidence=float(fields.get("_confidence", 0.5)),
             raw_text=raw_text or None,
             validations=_format_checks(doc.kind.value, fields),
-            masked_fields=["aadhaarNumber"] if doc.kind.value == "aadhaar" else [],
+            masked_fields=[],
         ))
 
     return ExtractionOutput(documents=out), gpu
@@ -133,12 +132,3 @@ def _verhoeff_check(digits: str) -> bool:
     return c == 0
 
 
-def _mask_sensitive(kind: str, fields: dict) -> dict:
-    """Mask first 8 of the 12-digit Aadhaar (§4.2) — raw value never leaves here."""
-    if kind != "aadhaar":
-        return fields
-    masked = dict(fields)
-    raw = re.sub(r"\D", "", str(masked.get("aadhaarNumber", "")))
-    if len(raw) == 12:
-        masked["aadhaarNumber"] = f"XXXX-XXXX-{raw[8:]}"
-    return masked

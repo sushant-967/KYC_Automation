@@ -38,8 +38,18 @@ def run_risk(entity: EntityResolutionOutput, screening: ScreeningOutput,
         c.append(RiskContributor(signal="adverse_media", weight=W["adverse_media_base"],
                                  value=sev, contribution=W["adverse_media_base"] * SEVERITY_MULT[sev]))
     if idv.doc_authenticity == "fail":
+        failed_checks = []
+        if idv.aadhaar_format_valid is False:
+            failed_checks.append("aadhaar_verhoeff")
+        if idv.pan_format_valid is False:
+            failed_checks.append("pan_format")
+        if idv.mrz_valid is False:
+            failed_checks.append("passport_mrz")
+        if idv.expiry_ok is False:
+            failed_checks.append("passport_expired")
         c.append(RiskContributor(signal="id_fail", weight=W["id_fail"],
-                                 value="fail", contribution=W["id_fail"]))
+                                 value=failed_checks or ["unknown"],
+                                 contribution=W["id_fail"]))
     if not entity.name_consistent:
         failing = [f"{m.doc_kind.value}:{m.score:.2f}" for m in entity.name_matches if not m.ok]
         if entity.name_affidavit_covers_discrepancy:
@@ -47,6 +57,11 @@ def run_risk(entity: EntityResolutionOutput, screening: ScreeningOutput,
             c.append(RiskContributor(signal="name_mismatch_affidavit_resolved",
                                      weight=W["name_mismatch"], value=failing,
                                      contribution=5))
+        elif entity.affidavit_retries_exhausted:
+            # Customer submitted affidavit multiple times but it never covered the mismatch.
+            c.append(RiskContributor(signal="name_mismatch_affidavit_exhausted",
+                                     weight=W["name_mismatch"], value=failing,
+                                     contribution=W["name_mismatch"]))
         elif entity.name_affidavit_submitted:
             # Affidavit submitted but doesn't cover all failing names — partial credit.
             c.append(RiskContributor(signal="name_mismatch_affidavit_insufficient",
