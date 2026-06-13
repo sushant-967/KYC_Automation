@@ -28,6 +28,16 @@ async def run_eval(
     vllm: VllmClient,
 ) -> tuple[EvalOutput, list[GpuCallMetric]]:
     high_weight = [c for c in risk.contributors if c.contribution >= HIGH_WEIGHT_THRESHOLD]
+
+    # No high-weight signals → coverage is vacuously complete; nothing to evaluate.
+    if not high_weight:
+        return EvalOutput(
+            faithfulness=1.0, coverage=1.0,
+            missing_signals=[], hallucinated_signals=[],
+            verdict="pass",
+            rationale="No high-weight signals (all contributions < 15 pts) — coverage is vacuously complete.",
+        ), []
+
     all_contribs = [{"signal": c.signal, "contribution": round(c.contribution, 1)}
                     for c in risk.contributors]
     hw_contribs = [{"signal": c.signal, "contribution": round(c.contribution, 1)}
