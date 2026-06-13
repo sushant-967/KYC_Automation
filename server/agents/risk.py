@@ -39,8 +39,6 @@ def run_risk(entity: EntityResolutionOutput, screening: ScreeningOutput,
                                  value=sev, contribution=W["adverse_media_base"] * SEVERITY_MULT[sev]))
     if idv.doc_authenticity == "fail":
         failed_checks = []
-        if idv.aadhaar_format_valid is False:
-            failed_checks.append("aadhaar_verhoeff")
         if idv.pan_format_valid is False:
             failed_checks.append("pan_format")
         if idv.mrz_valid is False:

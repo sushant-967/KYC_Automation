@@ -5,9 +5,12 @@ No new model; consumes Validations the extraction agent already computed.
 Checks by document type:
   passport         — MRZ checksum (TODO) + expiry date
   pan              — regex ^[A-Z]{5}[0-9]{4}[A-Z]$
-  aadhaar          — Verhoeff checksum over 12 digits
   voter_id /
   driving_license  — presence + name field non-empty (basic completeness)
+
+Aadhaar Verhoeff checksum is intentionally excluded — vision models frequently
+misread digits from low-quality scans producing false positives. Aadhaar is
+identified only by its UIDAI-masked format (XXXX-XXXX-{last4}).
 """
 from __future__ import annotations
 
@@ -22,7 +25,6 @@ def run_id_verification(extraction: ExtractionOutput) -> IDVerificationOutput:
     mrz_valid = None
     expiry_ok = None
     pan_format_valid = None
-    aadhaar_format_valid = None
 
     for doc in extraction.documents:
         kind = doc.kind.value
@@ -44,12 +46,7 @@ def run_id_verification(extraction: ExtractionOutput) -> IDVerificationOutput:
             if pan_format_valid is not None:
                 checks.append(pan_format_valid)
 
-        elif kind == "aadhaar":
-            aadhaar_format_valid = v.aadhaar_verhoeff_ok if v else None
-            if aadhaar_format_valid is not None:
-                checks.append(aadhaar_format_valid)
-
-        elif kind in ("voter_id", "driving_license"):
+        elif kind in ("voter_id", "driving_license", "aadhaar"):
             # Basic completeness — name must be extractable
             name_present = bool(str(doc.fields.get("name", "")).strip())
             checks.append(name_present)
@@ -66,5 +63,4 @@ def run_id_verification(extraction: ExtractionOutput) -> IDVerificationOutput:
         mrz_valid=mrz_valid,
         expiry_ok=expiry_ok,
         pan_format_valid=pan_format_valid,
-        aadhaar_format_valid=aadhaar_format_valid,
     )

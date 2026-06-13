@@ -85,7 +85,7 @@ async def run_explainability(
             {"role": "system",
              "content": "You are a KYC compliance analyst. Write ONE sentence for "
                         '"summary" (key finding) and ONE sentence for "recommended_action". '
-                        'Output ONLY {"summary": "...", "recommended_action": "..."}.'},
+                        'Output ONLY valid JSON: {"summary": "...", "recommended_action": "..."}.',},
             {"role": "user", "content": json.dumps({
                 "subject": entity.canonical_name,
                 "score": risk.score,
@@ -208,8 +208,6 @@ def _raw_node(
         failed = []
         if idv.pan_format_valid is False:
             failed.append("PAN format")
-        if idv.aadhaar_format_valid is False:
-            failed.append("Aadhaar Verhoeff")
         if idv.mrz_valid is False:
             failed.append("Passport MRZ")
         if idv.expiry_ok is False:

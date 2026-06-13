@@ -75,7 +75,6 @@ class IntakeOutput(BaseModel):
 class Validations(BaseModel):
     pan_regex_ok: Optional[bool] = None
     mrz_checksum_ok: Optional[bool] = None
-    aadhaar_verhoeff_ok: Optional[bool] = None
 
 
 class ExtractedDocument(BaseModel):
@@ -163,7 +162,6 @@ class IDVerificationOutput(BaseModel):
     expiry_ok: Optional[bool] = None
     face_match_score: Optional[float] = Field(default=None, ge=0, le=1)
     pan_format_valid: Optional[bool] = None       # PAN regex ^[A-Z]{5}[0-9]{4}[A-Z]$
-    aadhaar_format_valid: Optional[bool] = None   # Verhoeff checksum over 12 digits
 
 
 class FinancialProfileOutput(BaseModel):

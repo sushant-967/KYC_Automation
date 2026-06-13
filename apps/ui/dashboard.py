@@ -263,14 +263,12 @@ def render_results(case: dict) -> None:
         if idv:
             st.subheader("ID Verification")
             _IDV_CHECKS = [
-                ("aadhaar_format_valid", "Aadhaar Verhoeff checksum",
-                 "12-digit number passed checksum", "Verhoeff checksum failed — digit may be misread or tampered"),
-                ("pan_format_valid",     "PAN format",
-                 "Regex ABCDE1234F valid",           "Invalid format — expected 5 letters + 4 digits + 1 letter"),
-                ("mrz_valid",            "Passport MRZ checksum",
-                 "Machine-readable zone valid",      "MRZ checksum failed — document may be tampered"),
-                ("expiry_ok",            "Passport expiry",
-                 "Document is valid (not expired)",  "Document is expired"),
+                ("pan_format_valid", "PAN format",
+                 "Regex ABCDE1234F valid",      "Invalid format — expected 5 letters + 4 digits + 1 letter"),
+                ("mrz_valid",        "Passport MRZ checksum",
+                 "Machine-readable zone valid", "MRZ checksum failed — document may be tampered"),
+                ("expiry_ok",        "Passport expiry",
+                 "Document is valid (not expired)", "Document is expired"),
             ]
             for field, label, ok_msg, fail_msg in _IDV_CHECKS:
                 val = idv.get(field)
@@ -309,8 +307,6 @@ def render_results(case: dict) -> None:
         # Collect which checks failed
         if idv.get("pan_format_valid") is False:
             st.warning("**PAN** — format invalid (expected 5 letters + 4 digits + 1 letter, e.g. ABCDE1234F)")
-        if idv.get("aadhaar_format_valid") is False:
-            st.warning("**Aadhaar** — Verhoeff checksum failed (12-digit number is incorrect or tampered)")
         if idv.get("mrz_valid") is False:
             st.warning("**Passport MRZ** — checksum failed (machine-readable zone may be tampered)")
         if idv.get("expiry_ok") is False:

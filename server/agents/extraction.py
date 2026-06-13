@@ -4,7 +4,12 @@ Extraction Agent (DEEP ★, §4.2) — Qwen2.5-VL-72B via vLLM :8000.
 Per document: an optional PaddleOCR pre-pass produces raw text; that text plus
 the image are sent to the vision LLM with a per-doc-kind JSON-schema prompt;
 the LLM returns structured fields + confidence; deterministic format checks
-run (PAN regex, MRZ checksum, Aadhaar Verhoeff).
+run (PAN regex, MRZ checksum); then sensitive fields are masked before the
+document propagates to any downstream agent.
+
+Masking policy (RBI / UIDAI mandates):
+  Aadhaar — UIDAI circular: only last 4 digits visible → XXXX-XXXX-{last4}
+  PAN     — RBI data-minimisation: mask 4 sequential digits → ABCDE####F
 
 If PaddleOCR isn't installed, `ocr.extract_text` silently returns "" and the
 vision LLM does extraction on the image alone — no behavior change for users
@@ -52,13 +57,15 @@ async def run_extraction(
         gpu.append(result.metric)
 
         fields = result.json if isinstance(result.json, dict) else {}
+        validations = _format_checks(doc.kind.value, fields)   # check raw before masking
+        masked, masked_field_names = _mask_fields(doc.kind.value, fields)
         out.append(ExtractedDocument(
             kind=doc.kind,
-            fields=fields,
+            fields=masked,
             confidence=float(fields.get("_confidence", 0.5)),
             raw_text=raw_text or None,
-            validations=_format_checks(doc.kind.value, fields),
-            masked_fields=[],
+            validations=validations,
+            masked_fields=masked_field_names,
         ))
 
     return ExtractionOutput(documents=out), gpu
@@ -89,46 +96,38 @@ def _user_prompt(kind: str, raw_text: str) -> str:
 
 
 def _format_checks(kind: str, fields: dict) -> Validations | None:
+    """Run on raw (pre-mask) fields — PAN regex and MRZ checksum only."""
     if kind == "pan":
         pan = str(fields.get("pan", ""))
         return Validations(pan_regex_ok=bool(PAN_RE.match(pan)))
     if kind == "passport":
-        return Validations(mrz_checksum_ok=False)  # TODO: parse MRZ + checksum
-    if kind == "aadhaar":
-        raw = re.sub(r"\D", "", str(fields.get("aadhaarNumber", "")))
-        return Validations(aadhaar_verhoeff_ok=_verhoeff_check(raw) if len(raw) == 12 else False)
+        return Validations(mrz_checksum_ok=False)  # TODO: parse MRZ lines + checksum
     return None
 
 
-# ── Verhoeff checksum for 12-digit Aadhaar ──────────────────────────────────
-_V_D = [
-    [0,1,2,3,4,5,6,7,8,9],
-    [1,2,3,4,0,6,7,8,9,5],
-    [2,3,4,0,1,7,8,9,5,6],
-    [3,4,0,1,2,8,9,5,6,7],
-    [4,0,1,2,3,9,5,6,7,8],
-    [5,9,8,7,6,0,4,3,2,1],
-    [6,5,9,8,7,1,0,4,3,2],
-    [7,6,5,9,8,2,1,0,4,3],
-    [8,7,6,5,9,3,2,1,0,4],
-    [9,8,7,6,5,4,3,2,1,0],
-]
-_V_P = [
-    [0,1,2,3,4,5,6,7,8,9],
-    [1,5,7,6,2,8,3,0,9,4],
-    [5,8,0,3,7,9,6,1,4,2],
-    [8,9,1,6,0,4,3,5,2,7],
-    [9,4,5,3,1,2,6,8,7,0],
-    [4,2,8,6,5,7,3,9,0,1],
-    [2,7,9,3,8,0,6,4,1,5],
-    [7,0,4,6,9,1,3,2,5,8],
-]
-_V_INV = [0,4,3,2,1,9,8,7,6,5]
+def _mask_fields(kind: str, fields: dict) -> tuple[dict, list[str]]:
+    """
+    Apply RBI/UIDAI masking. Returns (masked_fields_dict, list_of_masked_field_names).
+    Masking happens after format checks so raw values never leave this function.
 
-def _verhoeff_check(digits: str) -> bool:
-    c = 0
-    for i, ch in enumerate(reversed(digits)):
-        c = _V_D[c][_V_P[i % 8][int(ch)]]
-    return c == 0
+    Aadhaar — UIDAI mandate: XXXX-XXXX-{last4}
+    PAN     — RBI data-minimisation: {first5}####{last1}  e.g. ABCDE####F
+    """
+    masked = dict(fields)
+    names: list[str] = []
+
+    if kind == "aadhaar":
+        raw = re.sub(r"\D", "", str(masked.get("aadhaarNumber", "")))
+        if len(raw) >= 4:
+            masked["aadhaarNumber"] = f"XXXX-XXXX-{raw[-4:]}"
+            names.append("aadhaarNumber")
+
+    if kind == "pan":
+        pan = str(masked.get("pan", ""))
+        if len(pan) == 10:
+            masked["pan"] = f"{pan[:5]}####{pan[-1]}"
+            names.append("pan")
+
+    return masked, names
 
 
