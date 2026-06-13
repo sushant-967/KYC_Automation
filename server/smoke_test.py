@@ -78,7 +78,12 @@ async def main() -> int:
     print("end-to-end ms:", round(state.metrics.end_to_end_ms or 0, 1))
 
     assert state.agent_outputs.decision is not None, "no decision produced"
-    assert state.status in {"approved", "awaiting_human", "escalated"}, state.status
+    assert state.agent_outputs.explanation is not None, "no explanation produced"
+    assert state.agent_outputs.explanation.dag_nodes, "DAG must have at least one node"
+    assert state.status in {
+        "approved", "awaiting_human", "escalated",
+        "awaiting_documents", "awaiting_id_review",
+    }, state.status
     print("\nPASS — full pipeline ran end-to-end with stubbed vLLM.")
     return 0
 

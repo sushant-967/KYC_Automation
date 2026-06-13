@@ -52,6 +52,56 @@ DOC_LABELS = {
 st.set_page_config(page_title="Agentic KYC", page_icon="🛡️", layout="wide")
 
 
+def _dag_to_dot(dag_nodes: list[dict], dag_edges: list[dict], decision_str: str) -> str:
+    """Build a Graphviz DOT string from the causal DAG returned by the explainability agent."""
+    dec_color = {
+        "approve": "#16a34a", "approved": "#16a34a",
+        "review":  "#d97706",
+        "escalate": "#dc2626", "escalated": "#dc2626",
+        "reject": "#7c3aed",
+    }.get(decision_str, "#6b7280")
+
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    lines = [
+        "digraph causal_chain {",
+        '    rankdir=LR;',
+        '    graph [bgcolor="#fafafa", pad="0.4"];',
+        '    node [fontname="Helvetica", fontsize=10, margin="0.25,0.12"];',
+        '    edge [color="#94a3b8", arrowsize=0.75];',
+    ]
+    for n in dag_nodes:
+        nid = f'"{n["node_id"]}"'
+        label = _esc(n.get("label", n["node_id"]))
+        kind = n.get("kind", "raw_value")
+        contrib = n.get("contribution", 0)
+
+        if kind == "decision":
+            attrs = (f'label="{label}", shape=diamond, style=filled, '
+                     f'fillcolor="{dec_color}", fontcolor="white", penwidth=2')
+        elif kind == "signal":
+            if contrib >= 30:
+                fill, border = "#fee2e2", "#dc2626"
+            elif contrib >= 15:
+                fill, border = "#ffedd5", "#f97316"
+            else:
+                fill, border = "#fefce8", "#ca8a04"
+            attrs = (f'label="{label}", shape=ellipse, style=filled, '
+                     f'fillcolor="{fill}", color="{border}", penwidth=1.5')
+        else:
+            attrs = (f'label="{label}", shape=box, style="filled,rounded", '
+                     f'fillcolor="#f0f9ff", color="#0284c7"')
+
+        lines.append(f"    {nid} [{attrs}];")
+
+    for e in dag_edges:
+        lines.append(f'    "{e["source"]}" -> "{e["target"]}";')
+
+    lines.append("}")
+    return "\n".join(lines)
+
+
 # ── API helpers ─────────────────────────────────────────────────────────────
 
 def api_health() -> dict | None:
@@ -153,14 +203,31 @@ def render_results(case: dict) -> None:
             st.caption(am["summary"])
 
     with right:
-        st.subheader("Explainability")
+        st.subheader("Causal Audit Trail")
         if explanation.get("summary"):
             st.info(explanation["summary"])
-        for card in explanation.get("evidence_cards", []):
-            sev = card.get("severity", "low")
-            dot = {"high": "🔴", "medium": "🟠", "low": "🟡"}.get(sev, "⚪")
-            with st.expander(f"{dot} {card.get('title','')}  ·  {card.get('source','')}"):
-                st.write(card.get("finding", ""))
+
+        dag_nodes = explanation.get("dag_nodes", [])
+        dag_edges = explanation.get("dag_edges", [])
+        if dag_nodes:
+            dot_src = _dag_to_dot(dag_nodes, dag_edges, decision.get("decision", ""))
+            try:
+                st.graphviz_chart(dot_src, use_container_width=True)
+            except Exception:
+                for card in explanation.get("evidence_cards", []):
+                    sev = card.get("severity", "low")
+                    dot_icon = {"high": "🔴", "medium": "🟠", "low": "🟡"}.get(sev, "⚪")
+                    with st.expander(f"{dot_icon} {card.get('title','')}  ·  {card.get('source','')}"):
+                        st.write(card.get("finding", ""))
+        elif explanation.get("evidence_cards"):
+            for card in explanation.get("evidence_cards", []):
+                sev = card.get("severity", "low")
+                dot_icon = {"high": "🔴", "medium": "🟠", "low": "🟡"}.get(sev, "⚪")
+                with st.expander(f"{dot_icon} {card.get('title','')}  ·  {card.get('source','')}"):
+                    st.write(card.get("finding", ""))
+
+        if explanation.get("recommended_action"):
+            st.caption(f"Recommended: {explanation['recommended_action']}")
 
         # ID Verification detail — always visible so the officer sees what passed/failed
         idv = ao.get("id_verification") or {}

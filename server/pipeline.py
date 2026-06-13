@@ -157,13 +157,15 @@ async def _risk_node(state: GraphState):
 async def _explanation_node(state: GraphState):
     case = state["case"]
     gpu_local: list[GpuCallMetric] = []
+    o = case.agent_outputs
 
     async def _do():
-        o, g = await run_explainability(case.agent_outputs.entity_resolution,
-                                        case.agent_outputs.screening,
-                                        case.agent_outputs.risk, state["vllm"])
+        result, g = await run_explainability(
+            o.entity_resolution, o.screening, o.risk,
+            o.id_verification, o.financial_profile, o.decision,
+            state["vllm"])
         gpu_local.extend(g)
-        return o
+        return result
 
     case.agent_outputs.explanation = await _timed("explanation", state, _do)
     return {"gpu": gpu_local}
@@ -204,9 +206,9 @@ def _build_graph():
     g.add_edge("screening", "risk")
     g.add_edge("idVerification", "risk")
     g.add_edge("financialProfile", "risk")
-    g.add_edge("risk", "explanation")
-    g.add_edge("explanation", "decision")
-    g.add_edge("decision", END)
+    g.add_edge("risk", "decision")      # decision first so explanation can cite the verdict
+    g.add_edge("decision", "explanation")
+    g.add_edge("explanation", END)
     return g.compile()
 
 

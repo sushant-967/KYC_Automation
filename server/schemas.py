@@ -39,6 +39,8 @@ AgentName = Literal[
     "financialProfile", "risk", "explanation", "decision",
 ]
 
+NodeKind = Literal["raw_value", "signal", "decision"]
+
 
 # ── Submission / Intake (§4.1) ──────────────────────────────────────────────
 
@@ -193,10 +195,28 @@ class EvidenceCard(BaseModel):
     severity: Severity
 
 
+class EvidenceNode(BaseModel):
+    """One node in the causal audit DAG — links a risk point to its origin."""
+    node_id: str
+    kind: NodeKind
+    label: str          # short label shown in the graph (newlines allowed)
+    agent: AgentName    # which agent produced this value
+    raw_value: Any      # the exact value read from that agent's output
+    rule: str           # the rule or threshold that was checked / violated
+    contribution: float = 0.0  # risk points (signal nodes only; 0 for raw/decision)
+
+
+class CausalEdge(BaseModel):
+    source: str   # node_id
+    target: str   # node_id
+
+
 class ExplanationOutput(BaseModel):
     summary: str
     evidence_cards: list[EvidenceCard]
     recommended_action: str
+    dag_nodes: list[EvidenceNode] = Field(default_factory=list)
+    dag_edges: list[CausalEdge] = Field(default_factory=list)
 
 
 # ── Decision (§4.9) ─────────────────────────────────────────────────────────
