@@ -36,7 +36,7 @@ class DocumentKind(str, Enum):
 
 AgentName = Literal[
     "intake", "extraction", "entityResolution", "screening", "idVerification",
-    "financialProfile", "risk", "explanation", "decision",
+    "financialProfile", "risk", "explanation", "decision", "eval",
 ]
 
 NodeKind = Literal["raw_value", "signal", "decision"]
@@ -219,6 +219,21 @@ class ExplanationOutput(BaseModel):
     dag_edges: list[CausalEdge] = Field(default_factory=list)
 
 
+# ── Eval (§4.10) — LLM-as-judge faithfulness + coverage ────────────────────
+
+EvalVerdict = Literal["pass", "warn", "fail"]
+
+
+class EvalOutput(BaseModel):
+    """Structured quality score produced by the LLM-as-judge eval agent."""
+    faithfulness: float = Field(ge=0, le=1)     # 1.0 = zero hallucinated signals
+    coverage: float = Field(ge=0, le=1)          # fraction of high-weight signals in narrative
+    missing_signals: list[str] = Field(default_factory=list)       # high-weight but absent
+    hallucinated_signals: list[str] = Field(default_factory=list)  # in narrative, not in contributors
+    verdict: EvalVerdict
+    rationale: str                               # one-sentence LLM justification
+
+
 # ── Decision (§4.9) ─────────────────────────────────────────────────────────
 
 Decision = Literal["approve", "review", "escalate", "reject"]
@@ -278,6 +293,7 @@ class AgentOutputs(BaseModel):
     risk: Optional[RiskOutput] = None
     explanation: Optional[ExplanationOutput] = None
     decision: Optional[DecisionOutput] = None
+    eval: Optional[EvalOutput] = None
 
 
 class CaseMetrics(BaseModel):

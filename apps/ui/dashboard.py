@@ -32,6 +32,7 @@ AGENTS = [
     ("risk", "Risk Aggregation"),
     ("explanation", "Explainability ★"),
     ("decision", "Decision"),
+    ("eval", "LLM Eval ★"),
 ]
 TERMINAL = {"approved", "rejected", "escalated", "awaiting_human", "awaiting_documents", "awaiting_id_review", "error"}
 ICON = {"pending": "⚪", "running": "🟡", "done": "✅"}
@@ -228,6 +229,34 @@ def render_results(case: dict) -> None:
 
         if explanation.get("recommended_action"):
             st.caption(f"Recommended: {explanation['recommended_action']}")
+
+        # ── LLM-as-judge eval badge ─────────────────────────────────────────
+        eval_out = ao.get("eval") or {}
+        if eval_out:
+            verdict = eval_out.get("verdict", "")
+            coverage = eval_out.get("coverage", 0)
+            faithfulness = eval_out.get("faithfulness", 0)
+            missing = eval_out.get("missing_signals", [])
+            hallucinated = eval_out.get("hallucinated_signals", [])
+            rationale = eval_out.get("rationale", "")
+
+            v_color = {"pass": "#16a34a", "warn": "#d97706", "fail": "#dc2626"}.get(verdict, "#6b7280")
+            v_icon  = {"pass": "✅", "warn": "⚠️", "fail": "❌"}.get(verdict, "❓")
+            detail = (
+                (f" · missing: <b>{', '.join(missing)}</b>" if missing else "") +
+                (f" · hallucinated: <b>{', '.join(hallucinated)}</b>" if hallucinated else "")
+            )
+            st.markdown(
+                f"<div style='margin-top:10px;padding:8px 14px;border-radius:8px;"
+                f"background:{v_color}12;border:1px solid {v_color}44;font-size:13px'>"
+                f"{v_icon} <b>EVAL {verdict.upper()}</b>"
+                f" &nbsp;·&nbsp; coverage <b>{coverage:.0%}</b>"
+                f" &nbsp;·&nbsp; faithfulness <b>{faithfulness:.0%}</b>"
+                f"{detail}</div>",
+                unsafe_allow_html=True,
+            )
+            if rationale:
+                st.caption(f"Eval rationale: {rationale}")
 
         # ID Verification detail — always visible so the officer sees what passed/failed
         idv = ao.get("id_verification") or {}

@@ -36,6 +36,7 @@ from agents.financial_profile import run_financial_profile
 from agents.risk import run_risk
 from agents.explainability import run_explainability
 from agents.decision import run_decision
+from agents.eval import run_eval
 
 # Emit callback: (agent, status, payload) -> None. Used for audit log + SSE.
 Emit = Callable[[str, str, object], None]
@@ -171,6 +172,23 @@ async def _explanation_node(state: GraphState):
     return {"gpu": gpu_local}
 
 
+async def _eval_node(state: GraphState):
+    case = state["case"]
+    gpu_local: list[GpuCallMetric] = []
+    o = case.agent_outputs
+
+    async def _do():
+        result, g = await run_eval(o.explanation, o.risk, state["vllm"])
+        gpu_local.extend(g)
+        return result
+
+    try:
+        case.agent_outputs.eval = await _timed("eval", state, _do)
+    except Exception:
+        pass   # eval is observability — never let it block the pipeline
+    return {"gpu": gpu_local}
+
+
 async def _decision_node(state: GraphState):
     case = state["case"]
     case.agent_outputs.decision = await _timed(
@@ -193,6 +211,7 @@ def _build_graph():
     g.add_node("risk", _risk_node)
     g.add_node("explanation", _explanation_node)
     g.add_node("decision", _decision_node)
+    g.add_node("eval", _eval_node)
 
     g.add_edge(START, "intake")
     g.add_edge("intake", "extraction")
@@ -208,7 +227,8 @@ def _build_graph():
     g.add_edge("financialProfile", "risk")
     g.add_edge("risk", "decision")      # decision first so explanation can cite the verdict
     g.add_edge("decision", "explanation")
-    g.add_edge("explanation", END)
+    g.add_edge("explanation", "eval")   # eval judges the explanation's own output
+    g.add_edge("eval", END)
     return g.compile()
 
 
