@@ -38,11 +38,17 @@ async def run_eval(
             {"role": "system",
              "content": (
                  "You are a KYC audit quality evaluator. Given the ground-truth risk "
-                 "contributors and an AI-generated narrative summary, evaluate: "
-                 "(1) coverage — what fraction of HIGH-WEIGHT signals (contribution >= 15 pts) "
-                 "are adequately reflected in the summary? "
-                 "(2) faithfulness — does the summary mention any signals NOT in the "
-                 "ground-truth contributors? "
+                 "contributors and an AI-generated narrative summary, evaluate two things:\n\n"
+                 "1. COVERAGE — what fraction of HIGH-WEIGHT signals (contribution >= 15 pts, "
+                 "listed in high_weight_contributors) are reflected in the summary? "
+                 "Paraphrases count — 'ID document issues' covers 'id_fail', etc.\n\n"
+                 "2. FAITHFULNESS — does the summary mention risk topics that have NO "
+                 "corresponding entry anywhere in all_contributors? "
+                 "Be semantic and generous: 'geographical risks' = geography_risk, "
+                 "'income concerns' = income_implausibility, 'name discrepancy' = name_mismatch*, "
+                 "'address issues' = address_*, 'ID problems' = id_fail, etc. "
+                 "Only flag a genuine hallucination if the topic has absolutely no basis "
+                 "in any contributor. Do NOT flag natural-language paraphrases of real signals.\n\n"
                  "Return ONLY valid JSON: "
                  '{"missing_signals": [...], "hallucinated_signals": [...], '
                  '"coverage": 0.0-1.0, "faithfulness": 0.0-1.0, '
