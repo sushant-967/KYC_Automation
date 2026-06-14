@@ -24,15 +24,33 @@ def run_decision(risk: RiskOutput,
     if entity is not None:
         # 1. DOB must be confirmed by at least one document.
         if not entity.dob_confirmed:
-            return DecisionOutput(decision="escalate", requires_human=True)
+            return DecisionOutput(
+                decision="escalate", requires_human=True,
+                reasons=["Date of birth could not be confirmed from any submitted document — manual verification required."],
+            )
 
         # 2. Name must be either consistent across docs or resolved by a valid
         #    affidavit. Unresolved name cannot be approved.
         name_resolved = entity.name_consistent or entity.name_affidavit_covers_discrepancy
         if not name_resolved:
+            if entity.affidavit_retries_exhausted:
+                name_reason = (
+                    f"Name inconsistency across documents — dual-name affidavit was submitted "
+                    f"{entity.affidavit_attempts} time(s) but did not cover all failing name variants."
+                )
+            elif entity.name_affidavit_submitted:
+                name_reason = (
+                    "Name inconsistency across documents — the affidavit submitted does not cover all "
+                    "name variants; please resubmit a notarized dual-name affidavit listing all name forms."
+                )
+            else:
+                name_reason = (
+                    "Name inconsistency across documents — a notarized dual-name affidavit is required "
+                    "to bridge the discrepancy between the application name and the ID documents."
+                )
             if risk.score >= THRESHOLDS["escalate"]:
-                return DecisionOutput(decision="escalate", requires_human=True)
-            return DecisionOutput(decision="review", requires_human=True)
+                return DecisionOutput(decision="escalate", requires_human=True, reasons=[name_reason])
+            return DecisionOutput(decision="review", requires_human=True, reasons=[name_reason])
 
         # 3. Address — if the customer supplied an address on the form it must
         #    be confirmed by at least one document or additional proof.
@@ -42,14 +60,25 @@ def run_decision(risk: RiskOutput,
             or entity.address_additional_proof_confirmed is True
         )
         if not address_ok:
+            if entity.address_additional_proof_submitted:
+                addr_reason = (
+                    "Address on the application does not match the additional proof submitted — "
+                    "please provide a utility bill or bank statement (< 3 months) matching the declared address."
+                )
+            else:
+                addr_reason = (
+                    "Address on the application could not be confirmed from any submitted document — "
+                    "please provide a utility bill or bank statement dated within 3 months."
+                )
             if risk.score >= THRESHOLDS["escalate"]:
-                return DecisionOutput(decision="escalate", requires_human=True)
-            return DecisionOutput(decision="review", requires_human=True)
+                return DecisionOutput(decision="escalate", requires_human=True, reasons=[addr_reason])
+            return DecisionOutput(decision="review", requires_human=True, reasons=[addr_reason])
 
     # ── Risk-based decision ──────────────────────────────────────────────────
     s = risk.score
     if s < THRESHOLDS["approve"]:
         return DecisionOutput(decision="approve", requires_human=False)
+    score_reason = f"Risk score {s}/100 exceeds the approval threshold — compliance officer review required."
     if s < THRESHOLDS["escalate"]:
-        return DecisionOutput(decision="review", requires_human=True)
-    return DecisionOutput(decision="escalate", requires_human=True)
+        return DecisionOutput(decision="review", requires_human=True, reasons=[score_reason])
+    return DecisionOutput(decision="escalate", requires_human=True, reasons=[score_reason])

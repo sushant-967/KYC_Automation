@@ -80,9 +80,9 @@ class DemoVllm:
     async def aclose(self):
         pass
 
-    async def embed(self, text):
+    async def embed(self, text, agent: str = ""):
         items = text if isinstance(text, list) else [text]
-        return [name_vec(t).tolist() for t in items], GpuCallMetric(ts="demo", model="bge-demo", latency_ms=1.0)
+        return [name_vec(t).tolist() for t in items], GpuCallMetric(ts="demo", model="bge-demo", latency_ms=1.0, agent=agent or None)
 
     async def extract(self, messages, **kw):
         kind = _kind_from(messages)
@@ -99,7 +99,23 @@ class DemoVllm:
                 "evidence": [f"name≈{c['name']}", f"dob≈{c.get('dob')}"],
             } for c in data.get("candidates", [])]
             return _Res({"matches": matches}, "llama-demo")
-        # explainability
+        if '"subject"' in user and ('"dob"' in user or '"nationality"' in user):
+            # adverse media / PEP enrichment check
+            return _Res({"hit": False, "severity": None, "summary": None,
+                         "confirmed_details": [], "is_pep": False,
+                         "role": None, "confidence": 0.0,
+                         "rationale": "No adverse media found (demo mode)."}, "llama-demo")
+        if '"declared_income"' in user or '"income"' in user or '"employment"' in user:
+            # financial profile assessment
+            return _Res({"income_band": "medium", "income_plausibility": 0.8,
+                         "risk_flags": [], "summary": "Income consistent with declared employment (demo).",
+                         "rationale": "Demo mode — deterministic financial profile."}, "llama-demo")
+        if '"coverage"' in user or '"faithfulness"' in user or '"high_weight"' in user:
+            # eval / LLM-as-judge
+            return _Res({"coverage": 1.0, "faithfulness": 1.0, "score_alignment": 1.0,
+                         "hallucinations": [], "missing_signals": [],
+                         "verdict": "pass", "rationale": "Demo mode — eval passed."}, "llama-demo")
+        # fallback → explainability
         return _Res(_canned_explanation(user), "llama-demo")
 
 

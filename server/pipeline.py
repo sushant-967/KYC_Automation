@@ -9,8 +9,18 @@ pure Python. The graph is compiled once at import time.
            → { screening ★ ‖ id-verify ‖ financial-profile }
            → risk → explainability ★ → decision
 
-The agents, schemas, audit log, SSE emit, and metrics layers are unchanged —
-LangGraph only replaces the hand-written DAG that used to live here.
+Resilience: every node that calls vLLM is wrapped in a try/except. If a node
+fails (circuit open, all retries exhausted, unexpected error) the pipeline
+continues with a degraded stub output and emits a "degraded" SSE event instead
+of hanging or returning a 500. This ensures the case always reaches a terminal
+status even when a model endpoint is unavailable.
+
+Degradation strategy per agent:
+  extraction       → empty ExtractionOutput (no OCR; downstream uses form data)
+  screening        → all-clear stubs (no hits) + degraded flag in audit log
+  financial_profile→ mid-range defaults (0.5/0.1/0.1) — conservative, not zero
+  explainability   → deterministic template built from risk.contributors (no LLM)
+  eval             → silent skip (already had try/except; observability only)
 """
 from __future__ import annotations
 
@@ -18,13 +28,24 @@ import asyncio
 import operator
 import os
 import time
+import traceback
 from dataclasses import dataclass
-from typing import Annotated, Awaitable, Callable, TypedDict
+from typing import Annotated, Awaitable, Callable, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from schemas import AgentMetric, CaseState, GpuCallMetric
+from datetime import datetime, timezone
+
+from schemas import (
+    AdverseMedia, AgentMetric, CaseState, EvidenceCard, ExplanationOutput,
+    ExtractionOutput, FinancialProfileOutput, GpuCallMetric, GuardrailViolation,
+    IDVerificationOutput, RiskOutput, ScreeningOutput, Severity, SubScreening,
+)
+from guardrails import (
+    guard_customer_input, guard_prompt_injection, guard_llm_output, is_adversarial,
+)
 from screening_index import ScreeningIndex
+from tavily_client import TavilyClient
 from vllm_client import VllmClient
 
 from agents.intake import run_intake
@@ -42,12 +63,79 @@ from agents.eval import run_eval
 Emit = Callable[[str, str, object], None]
 
 
+# ── Degraded fallback outputs ─────────────────────────────────────────────────
+
+def _degraded_extraction() -> ExtractionOutput:
+    """No OCR available — downstream entity-resolution uses customer form data only."""
+    return ExtractionOutput(documents=[])
+
+
+def _degraded_screening() -> ScreeningOutput:
+    """Cannot screen — return all-clear stubs. Audit log records the failure."""
+    return ScreeningOutput(
+        sanctions=SubScreening(hit=False,
+                               rationale="Screening unavailable — model endpoint down"),
+        pep=SubScreening(hit=False,
+                         rationale="Screening unavailable — model endpoint down"),
+        adverse_media=AdverseMedia(hit=False),
+    )
+
+
+def _degraded_financial() -> FinancialProfileOutput:
+    """Mid-range defaults: conservative but not zero — avoids artificially clean scores."""
+    return FinancialProfileOutput(
+        income_plausibility_score=0.5,
+        geography_risk=0.1,
+        employment_risk=0.25,
+        financial_risk_rationale="Financial profile unavailable — model endpoint down",
+    )
+
+
+def _degraded_explanation(risk: Optional[RiskOutput]) -> ExplanationOutput:
+    """Deterministic template from risk.contributors — no LLM required."""
+    if risk and risk.contributors:
+        score = risk.score
+        signals = "; ".join(
+            f"{c.signal} (+{c.contribution:.0f}pts)"
+            for c in sorted(risk.contributors, key=lambda x: -x.contribution)
+        )
+        summary = (
+            f"Risk score {score:.0f}/100. "
+            f"Key contributors: {signals}. "
+            "Full narrative unavailable — explanation model temporarily down."
+        )
+        cards = [
+            EvidenceCard(
+                title=c.signal.replace("_", " ").title(),
+                finding=f"Contributed {c.contribution:.0f} risk points (weight {c.weight:.0f})",
+                source=c.signal,
+                severity=Severity.high if c.contribution >= 30 else
+                         Severity.medium if c.contribution >= 15 else Severity.low,
+            )
+            for c in risk.contributors if c.contribution > 0
+        ]
+        action = ("Escalate for manual review." if score >= 70 else
+                  "Compliance officer review recommended." if score >= 30 else
+                  "Approved — low risk score.")
+    else:
+        summary = "Risk assessment unavailable — explanation model temporarily down."
+        cards   = []
+        action  = "Manual review required."
+
+    return ExplanationOutput(
+        summary=summary,
+        evidence_cards=cards,
+        recommended_action=action,
+    )
+
+
 @dataclass
 class PipelineIO:
     load_image: Callable[[str], Awaitable[str]]  # file_id -> data: URL
     entity_index: ScreeningIndex
     prior_case_lookup: Callable[[str], list[str]]
     emit: Emit
+    tavily: Optional[TavilyClient] = None        # None → DB-only screening fallback
 
 
 # ── LangGraph state ─────────────────────────────────────────────────────────
@@ -64,26 +152,65 @@ class GraphState(TypedDict, total=False):
     gpu: Annotated[list[GpuCallMetric], operator.add]
 
 
+def _emit_degraded(state: GraphState, agent: str, exc: Exception) -> None:
+    """Log a degraded-mode event to the audit log + SSE stream."""
+    brief = f"{type(exc).__name__}: {str(exc)[:120]}"
+    state["io"].emit(agent, "degraded", {"error": brief, "fallback": "stub output used"})
+
+
+def _record_guardrails(state: GraphState, agent: str,
+                       results: list) -> None:
+    """Persist guardrail results to case.guardrail_flags + emit SSE events."""
+    from guardrails import GuardrailResult  # local import avoids circular
+    ts = datetime.now(timezone.utc).isoformat()
+    for r in results:
+        if not r.passed:
+            violation = GuardrailViolation(
+                ts=ts, agent=agent, check=r.check,
+                level=r.level, violations=r.violations)
+            state["case"].guardrail_flags.append(violation)
+            state["io"].emit(agent, "guardrail_violation", {
+                "check": r.check,
+                "level": r.level,
+                "violations": r.violations,
+            })
+
+
 async def _timed(name: str, state: GraphState, fn):
-    """Emit running/done, time the call, accept sync or async agents."""
+    """Emit running/done, time the call, accept sync or async agents.
+
+    per_agent[name] is written in a finally block so it is ALWAYS set —
+    even when the call raises. This ensures the agent shows as "done" (not
+    "pending") on the dashboard even when degraded fallback takes over.
+    """
     io = state["io"]
     io.emit(name, "running", None)
     step_delay = float(os.environ.get("KYC_STEP_DELAY_MS", "0")) / 1000
     if step_delay:
         await asyncio.sleep(step_delay)
     started = time.perf_counter()
-    value = fn()
-    result = await value if asyncio.iscoroutine(value) else value
-    state["case"].metrics.per_agent[name] = AgentMetric(
-        latency_ms=(time.perf_counter() - started) * 1000)
-    io.emit(name, "done", _jsonable(result))
-    return result
+    try:
+        value = fn()
+        result = await value if asyncio.iscoroutine(value) else value
+        io.emit(name, "done", _jsonable(result))
+        return result
+    except Exception:
+        # Emit "done" even on failure so the UI never sees a permanent "running"
+        # spinner. The caller's except block will emit "degraded" with details.
+        io.emit(name, "done", None)
+        raise
+    finally:
+        # Always record latency regardless of success/failure.
+        state["case"].metrics.per_agent[name] = AgentMetric(
+            latency_ms=(time.perf_counter() - started) * 1000)
 
 
 # ── Nodes ───────────────────────────────────────────────────────────────────
 
 async def _intake_node(state: GraphState):
     case = state["case"]
+    # INPUT GUARDRAIL — validate customer form data before anything else runs.
+    _record_guardrails(state, "intake", guard_customer_input(case.customer))
     out = await _timed("intake", state, lambda: run_intake(
         case.case_id,
         {"customer": case.customer.model_dump(),
@@ -101,7 +228,19 @@ async def _extraction_node(state: GraphState):
         gpu_local.extend(g)
         return o
 
-    case.agent_outputs.extraction = await _timed("extraction", state, _do)
+    try:
+        case.agent_outputs.extraction = await _timed("extraction", state, _do)
+    except Exception as exc:
+        _emit_degraded(state, "extraction", exc)
+        case.agent_outputs.extraction = _degraded_extraction()
+
+    # INJECTION GUARDRAIL — scan every OCR'd document page for adversarial text
+    # that could hijack the Llama reasoning model downstream.
+    # Also scans doc.fields JSON values, catching jailbroken field values.
+    if case.agent_outputs.extraction:
+        _record_guardrails(state, "extraction",
+                           guard_prompt_injection(case.agent_outputs.extraction))
+
     return {"gpu": gpu_local}
 
 
@@ -120,12 +259,17 @@ async def _screening_node(state: GraphState):
 
     async def _do():
         o, g = await run_screening(case.agent_outputs.entity_resolution,
-                                   case.customer.dob, state["vllm"],
-                                   state["io"].entity_index)
+                                   case.customer, state["vllm"],
+                                   state["io"].entity_index,
+                                   state["io"].tavily)
         gpu_local.extend(g)
         return o
 
-    case.agent_outputs.screening = await _timed("screening", state, _do)
+    try:
+        case.agent_outputs.screening = await _timed("screening", state, _do)
+    except Exception as exc:
+        _emit_degraded(state, "screening", exc)
+        case.agent_outputs.screening = _degraded_screening()
     return {"gpu": gpu_local}
 
 
@@ -139,19 +283,30 @@ async def _id_verify_node(state: GraphState):
 
 async def _financial_node(state: GraphState):
     case = state["case"]
-    case.agent_outputs.financial_profile = await _timed(
-        "financialProfile", state,
-        lambda: run_financial_profile(case.customer))
-    return {}
+    gpu_local: list[GpuCallMetric] = []
+
+    async def _do():
+        o, g = await run_financial_profile(case.customer, state["vllm"])
+        gpu_local.extend(g)
+        return o
+
+    try:
+        case.agent_outputs.financial_profile = await _timed("financialProfile", state, _do)
+    except Exception as exc:
+        _emit_degraded(state, "financialProfile", exc)
+        case.agent_outputs.financial_profile = _degraded_financial()
+    return {"gpu": gpu_local}
 
 
 async def _risk_node(state: GraphState):
     case = state["case"]
     o = case.agent_outputs
+    flags = case.guardrail_flags  # pass adversarial-document flags to risk scorer
     case.agent_outputs.risk = await _timed(
         "risk", state,
         lambda: run_risk(o.entity_resolution, o.screening,
-                         o.id_verification, o.financial_profile))
+                         o.id_verification, o.financial_profile,
+                         guardrail_flags=flags))
     return {}
 
 
@@ -168,7 +323,11 @@ async def _explanation_node(state: GraphState):
         gpu_local.extend(g)
         return result
 
-    case.agent_outputs.explanation = await _timed("explanation", state, _do)
+    try:
+        case.agent_outputs.explanation = await _timed("explanation", state, _do)
+    except Exception as exc:
+        _emit_degraded(state, "explanation", exc)
+        case.agent_outputs.explanation = _degraded_explanation(o.risk)
     return {"gpu": gpu_local}
 
 
@@ -183,9 +342,12 @@ async def _eval_node(state: GraphState):
         return result
 
     try:
-        case.agent_outputs.eval = await _timed("eval", state, _do)
-    except Exception:
-        pass   # eval is observability — never let it block the pipeline
+        # Hard 45-second cap: eval is observability-only and must never block the pipeline.
+        case.agent_outputs.eval = await asyncio.wait_for(
+            _timed("eval", state, _do), timeout=45.0)
+    except Exception as exc:
+        # Emit degraded so the UI shows ⚠️ rather than spinning forever.
+        _emit_degraded(state, "eval", exc)
     return {"gpu": gpu_local}
 
 

@@ -6,26 +6,52 @@ the explainability honest. Weights are explicit constants (§4.7).
 """
 from __future__ import annotations
 
+from typing import Optional
 from schemas import (EntityResolutionOutput, FinancialProfileOutput,
-                     IDVerificationOutput, RiskContributor, RiskOutput,
-                     ScreeningOutput)
+                     GuardrailViolation, IDVerificationOutput, RiskContributor,
+                     RiskOutput, ScreeningOutput)
 
 W = {
-    "sanctions_hit": 50,
-    "pep_hit": 30,
-    "adverse_media_base": 20,  # × severity multiplier
-    "id_fail": 30,
-    "name_mismatch": 25,
-    "address_unverified": 15,
-    "geo_risk_max": 10,
-    "income_implausibility_max": 10,
+    # ── Baseline (always present — residual KYC uncertainty) ─────────────────
+    "baseline":                        5,  # no customer is zero-risk; screening DBs are not omniscient
+    # ── Adversarial document (guardrail-detected injection / jailbreak) ───────
+    "adversarial_document":           50,  # someone tried to manipulate the KYC system → auto-escalate
+    # ── Catastrophic (must escalate alone) ──────────────────────────────────
+    "sanctions_hit":                  75,  # confirmed watchlist match → always escalate
+    # ── High (review alone; two together escalate) ───────────────────────────
+    "pep_hit":                        40,  # politically exposed person
+    "id_fail":                        35,  # document authenticity failure
+    "name_mismatch":                  30,  # name inconsistency — aligns with hard-block threshold
+    "employment_income_contradiction": 25, # logically impossible income for job type
+    # ── Medium (contribute meaningfully in combination) ──────────────────────
+    "adverse_media_base":             20,  # × severity multiplier (low 0.5 · med 0.75 · high 1.0)
+    "employment_category_risk_max":   20,  # × employment_risk score (fires if ≥ 0.30)
+    "address_unverified":             15,  # address could not be confirmed
+    # ── Low (fine-tuning signals) ────────────────────────────────────────────
+    "geo_risk_max":                   10,  # × country risk (0–1, FATF-aligned)
+    "income_implausibility_max":      10,  # × (1 − plausibility_score)
 }
-SEVERITY_MULT = {"low": 0.5, "medium": 0.75, "high": 1.0}
+# Design invariants (enforce these if weights change):
+#   sanctions alone (75)           → ESCALATE  (≥ 70)
+#   pep alone (40)                 → REVIEW    (30–69)
+#   id_fail alone (35)             → REVIEW
+#   name_mismatch alone (30)       → REVIEW    (aligns with hard block)
+#   pep + id_fail (75)             → ESCALATE
+#   all financial at max (~57)     → REVIEW at worst
+SEVERITY_MULT   = {"low": 0.5, "medium": 0.75, "high": 1.0}
+EMP_RISK_THRESHOLD = 0.30   # corporate (0.15) and public_sector (0.10) do not fire
 
 
 def run_risk(entity: EntityResolutionOutput, screening: ScreeningOutput,
-             idv: IDVerificationOutput, fin: FinancialProfileOutput) -> RiskOutput:
-    c: list[RiskContributor] = []
+             idv: IDVerificationOutput, fin: FinancialProfileOutput,
+             guardrail_flags: Optional[list[GuardrailViolation]] = None) -> RiskOutput:
+    # Every customer carries residual KYC risk — screening databases are not
+    # omniscient, documents have OCR error rates, and circumstances change.
+    # RBI / FATF risk-based approach requires Low / Medium / High tiers, not zero.
+    c: list[RiskContributor] = [
+        RiskContributor(signal="baseline_kyc_risk", weight=W["baseline"],
+                        value="inherent", contribution=W["baseline"]),
+    ]
 
     if screening.sanctions.hit:
         c.append(RiskContributor(signal="sanctions_hit", weight=W["sanctions_hit"],
@@ -90,15 +116,57 @@ def run_risk(entity: EntityResolutionOutput, screening: ScreeningOutput,
                                      value=entity.address_match_score,
                                      contribution=W["address_unverified"]))
 
+    # Geography risk: only fire for medium-risk countries (> 0.15).
+    # Standard low-risk jurisdictions (India, USA, UK … = 0.10) are clean baseline
+    # and produce 1-pt noise that would appear on every Indian KYC case.
     geo = fin.geography_risk * W["geo_risk_max"]
-    if geo > 0:
+    if fin.geography_risk > 0.15:
         c.append(RiskContributor(signal="geography_risk", weight=W["geo_risk_max"],
-                                 value=fin.geography_risk, contribution=geo))
+                                 value=fin.geography_risk, contribution=round(geo, 1)))
 
+    # Income implausibility: only fire when plausibility is below 0.80.
+    # A perfectly within-band income (plausibility = 0.90) yields penalty = 1.0 pt —
+    # noise that would appear on every clean case.
     income_penalty = (1 - fin.income_plausibility_score) * W["income_implausibility_max"]
-    if income_penalty > 0:
+    if income_penalty >= 2.0:
         c.append(RiskContributor(signal="income_implausibility", weight=W["income_implausibility_max"],
-                                 value=fin.income_plausibility_score, contribution=income_penalty))
+                                 value=fin.income_plausibility_score, contribution=round(income_penalty, 1)))
+
+    # Employment category risk — fires for inherently high-risk occupation types.
+    if fin.employment_risk >= EMP_RISK_THRESHOLD:
+        emp_contribution = round(fin.employment_risk * W["employment_category_risk_max"], 1)
+        c.append(RiskContributor(
+            signal="employment_category_risk",
+            weight=W["employment_category_risk_max"],
+            value={"category": fin.employment_category, "risk_score": fin.employment_risk},
+            contribution=emp_contribution,
+        ))
+
+    # Employment-income contradiction — logically impossible combination.
+    if fin.employment_contradiction:
+        c.append(RiskContributor(
+            signal="employment_income_contradiction",
+            weight=W["employment_income_contradiction"],
+            value={"reason": fin.contradiction_reason, "category": fin.employment_category},
+            contribution=W["employment_income_contradiction"],
+        ))
+
+    # Adversarial document: injection or jailbreak attempt detected by guardrails.
+    # +50 pts auto-pushes any case into REVIEW or ESCALATE — someone tampered.
+    if guardrail_flags:
+        adversarial = [
+            f for f in guardrail_flags
+            if f.level == "critical" and
+               ("injection" in f.check or "jailbreak" in f.check)
+        ]
+        if adversarial:
+            checks = ", ".join(sorted({f.check for f in adversarial}))
+            c.append(RiskContributor(
+                signal="adversarial_document",
+                weight=W["adversarial_document"],
+                value=checks,
+                contribution=W["adversarial_document"],
+            ))
 
     score = min(100, round(sum(x.contribution for x in c)))
     return RiskOutput(score=score, contributors=c)

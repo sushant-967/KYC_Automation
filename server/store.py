@@ -69,6 +69,23 @@ class CaseStore:
             )
             self._conn.commit()
 
+    def get_audit(self, case_id: str) -> list[AuditEvent]:
+        """Read all audit events for a case from the audit table (written per-event,
+        unlike state.audit_log which only reflects the last full save)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts, agent, event, payload FROM audit "
+                "WHERE case_id=? ORDER BY id",
+                (case_id,),
+            ).fetchall()
+        return [
+            AuditEvent(
+                ts=r[0], agent=r[1], event=r[2],
+                payload=json.loads(r[3]) if r[3] else None,
+            )
+            for r in rows
+        ]
+
     def list_ids(self) -> list[str]:
         with self._lock:
             return [r[0] for r in self._conn.execute(

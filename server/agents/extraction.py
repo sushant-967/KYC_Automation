@@ -52,7 +52,7 @@ async def run_extraction(
                     {"type": "image_url", "image_url": {"url": image_url}},
                 ]},
             ],
-            json_mode=True, max_tokens=1024,
+            json_mode=True, max_tokens=1024, agent=f"extraction:{doc.kind.value}",
         )
         gpu.append(result.metric)
 

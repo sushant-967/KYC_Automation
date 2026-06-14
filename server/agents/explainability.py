@@ -19,8 +19,10 @@ from schemas import (
 )
 from vllm_client import VllmClient
 
-NAME_MATCH_THRESHOLD = 0.70
+NAME_MATCH_THRESHOLD    = 0.70
 ADDRESS_MATCH_THRESHOLD = 0.60
+_LAKH  = 100_000
+_CRORE = 10_000_000
 
 _SIGNAL_AGENT = {
     "sanctions_hit":                        "screening",
@@ -34,27 +36,38 @@ _SIGNAL_AGENT = {
     "address_unverified":                   "entityResolution",
     "address_resolved_by_additional_proof": "entityResolution",
     "address_additional_proof_mismatch":    "entityResolution",
-    "geography_risk":                       "financialProfile",
-    "income_implausibility":                "financialProfile",
+    "geography_risk":                        "financialProfile",
+    "income_implausibility":                 "financialProfile",
+    "employment_category_risk":              "financialProfile",
+    "employment_income_contradiction":       "financialProfile",
+}
+
+# Friendly labels for signal nodes — overrides the raw signal name in the DAG
+_SIGNAL_LABEL = {
+    "name_mismatch_affidavit_resolved":     "Name Resolved ✓",
+    "name_mismatch_affidavit_insufficient": "Affidavit Partial",
+    "name_mismatch_affidavit_exhausted":    "Affidavit Exhausted",
+    "address_resolved_by_additional_proof": "Address Resolved ✓",
+    "address_additional_proof_mismatch":    "Address Proof Mismatch",
 }
 
 _SIGNAL_RULE = {
     "sanctions_hit":
-        "weight=50 applied when sanctions.hit=True",
+        "weight=75 — confirmed sanctions match; alone pushes score to ESCALATE",
     "pep_hit":
-        "weight=30 applied when pep.hit=True",
+        "weight=40 — politically exposed person confirmed",
     "adverse_media":
         "weight=20 × severity_mult (low:0.5 · med:0.75 · high:1.0)",
     "id_fail":
-        "weight=30 applied when doc_authenticity=fail",
+        "weight=35 applied when doc_authenticity=fail",
     "name_mismatch":
-        "weight=25 when name_consistent=False and no affidavit submitted",
+        "weight=30 when name_consistent=False and no affidavit submitted",
     "name_mismatch_affidavit_resolved":
         "5-pt residual audit flag — affidavit covers the discrepancy",
     "name_mismatch_affidavit_insufficient":
-        "weight=25 × 0.6 — affidavit submitted but does not cover all name variants",
+        "weight=30 × 0.6 — affidavit submitted but does not cover all name variants",
     "name_mismatch_affidavit_exhausted":
-        "weight=25 — max retries exhausted, affidavit never covered the mismatch",
+        "weight=30 — max retries exhausted, affidavit never covered the mismatch",
     "address_unverified":
         "weight=15 when address_confirmed=False and no additional proof provided",
     "address_resolved_by_additional_proof":
@@ -62,9 +75,13 @@ _SIGNAL_RULE = {
     "address_additional_proof_mismatch":
         "weight=15 × 0.7 — additional proof submitted but address still does not match",
     "geography_risk":
-        "weight=10 × geography_risk (0–1 from financialProfile lookup table)",
+        "weight=10 × geography_risk (0–1 from FATF-aligned country lookup table)",
     "income_implausibility":
         "weight=10 × (1 − income_plausibility_score)",
+    "employment_category_risk":
+        "weight=20 × employment_risk — fires when risk ≥ 0.30 (pep_adjacent 0.85 · cash_intensive 0.75 · self_employed 0.40)",
+    "employment_income_contradiction":
+        "weight=25 — binary flag: declared income is logically impossible for the classified employment type",
 }
 
 
@@ -93,7 +110,7 @@ async def run_explainability(
                 "signals": [c.signal for c in risk.contributors],
             })},
         ],
-        json_mode=True, max_tokens=256,
+        json_mode=True, max_tokens=256, agent="explanation",
     )
 
     try:
@@ -142,10 +159,11 @@ def _build_dag(
         sig_id = f"node_sig_{contrib.signal}"
         ev_id = f"node_raw_{contrib.signal}"
 
+        sig_label = _SIGNAL_LABEL.get(contrib.signal, contrib.signal)
         nodes.append(EvidenceNode(
             node_id=sig_id,
             kind="signal",
-            label=f"{contrib.signal}\n+{contrib.contribution:.0f} pts",
+            label=f"{sig_label}\n+{contrib.contribution:.0f} pts",
             agent="risk",
             raw_value=contrib.value,
             rule=_SIGNAL_RULE.get(contrib.signal, f"weight={contrib.weight}"),
@@ -220,6 +238,15 @@ def _raw_node(
             contribution=0,
         )
 
+    if signal == "name_mismatch_affidavit_resolved":
+        return EvidenceNode(
+            node_id=node_id, kind="raw_value", agent=agent,
+            label="Name Discrepancy\nResolved by Affidavit ✓",
+            raw_value={"status": "resolved", "affidavit_covers_discrepancy": True},
+            rule=f"token-set ratio ≥ {NAME_MATCH_THRESHOLD} required — discrepancy bridged by dual-name affidavit",
+            contribution=0,
+        )
+
     if "name_mismatch" in signal:
         failing = [m for m in entity.name_matches if not m.ok]
         pairs = ", ".join(
@@ -231,6 +258,16 @@ def _raw_node(
             raw_value=[{"doc": m.doc_kind.value, "extracted": m.extracted_name,
                         "score": m.score} for m in failing],
             rule=f"token-set ratio ≥ {NAME_MATCH_THRESHOLD} required per document",
+            contribution=0,
+        )
+
+    if signal == "address_resolved_by_additional_proof":
+        score = entity.address_match_score
+        return EvidenceNode(
+            node_id=node_id, kind="raw_value", agent=agent,
+            label="Address Match\nResolved ✓",
+            raw_value={"status": "resolved", "match_score": score, "additional_proof": True},
+            rule=f"fuzzy address match ≥ {ADDRESS_MATCH_THRESHOLD} — confirmed by additional proof",
             contribution=0,
         )
 
@@ -246,21 +283,83 @@ def _raw_node(
             contribution=0,
         )
 
-    if signal == "geography_risk":
+    if signal == "employment_category_risk":
+        category = fin.employment_category or "unknown"
+        rationale = fin.financial_risk_rationale or ""
         return EvidenceNode(
             node_id=node_id, kind="raw_value", agent=agent,
-            label=f"Geography\nrisk {fin.geography_risk:.2f}",
-            raw_value={"geography_risk": fin.geography_risk},
-            rule="nationality × declared address → lookup table risk score",
+            label=f"Employment\n{category}\nrisk {fin.employment_risk:.2f}",
+            raw_value={
+                "employment_category": category,
+                "employment_risk": fin.employment_risk,
+                "llm_rationale": rationale,
+            },
+            rule="employment category → AML risk tier (pep_adjacent 0.85 · cash_intensive 0.75 · self_employed 0.40 · corporate 0.15)",
+            contribution=0,
+        )
+
+    if signal == "employment_income_contradiction":
+        return EvidenceNode(
+            node_id=node_id, kind="raw_value", agent=agent,
+            label=f"Contradiction\n{fin.employment_category or 'unknown'}\nvs income",
+            raw_value={
+                "employment_category": fin.employment_category,
+                "income_band_ok": fin.income_band_ok,
+                "reason": fin.contradiction_reason,
+            },
+            rule="employment type + declared income → logical consistency check (5× band ceiling or category hard cap)",
+            contribution=0,
+        )
+
+    if signal == "geography_risk":
+        gr = fin.geography_risk
+        if gr >= 0.90:
+            tier = "FATF blacklist"
+        elif gr >= 0.70:
+            tier = "FATF grey list / OFAC"
+        elif gr >= 0.60:
+            tier = "tax haven / secrecy"
+        else:
+            tier = "standard"
+        return EvidenceNode(
+            node_id=node_id, kind="raw_value", agent=agent,
+            label=f"Geography\n{tier}\nrisk {gr:.2f}",
+            raw_value={"geography_risk": gr, "fatf_tier": tier},
+            rule="nationality → FATF-aligned lookup (blacklist 0.95 · grey 0.75 · tax-haven 0.65 · standard 0.10)",
             contribution=0,
         )
 
     if signal == "income_implausibility":
+        score    = fin.income_plausibility_score
+        category = fin.employment_category or "unknown"
+        band_min = fin.income_band_min
+        band_max = fin.income_band_max
+
+        def _fmt(v: float | None) -> str:
+            if v is None:
+                return "no cap"
+            if v >= _CRORE:
+                return f"₹{v/_CRORE:.1f}Cr"
+            if v >= _LAKH:
+                return f"₹{v/_LAKH:.1f}L"
+            return f"₹{v:,.0f}"
+
+        band_str = f"{_fmt(band_min)} – {_fmt(band_max)}"
         return EvidenceNode(
             node_id=node_id, kind="raw_value", agent=agent,
-            label=f"Income\nplausibility {fin.income_plausibility_score:.2f}",
-            raw_value={"income_plausibility_score": fin.income_plausibility_score},
-            rule="declared_income vs employment_band → plausibility ratio",
+            label=f"Income\n{category}\nband {band_str}\nplausibility {score:.2f}",
+            raw_value={
+                "income_plausibility_score": score,
+                "employment_category": category,
+                "income_band_min": band_min,
+                "income_band_max": band_max,
+                "income_band_ok": fin.income_band_ok,
+            },
+            rule=(
+                "employment category → INR band → plausibility: "
+                "within band 0.90 · above <3× 0.70 · above ≥3× 0.35 · "
+                "below min 0.65 · no income 0.50"
+            ),
             contribution=0,
         )
 

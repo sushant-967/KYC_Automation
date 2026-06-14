@@ -146,6 +146,7 @@ class AdverseMedia(BaseModel):
     hit: bool
     summary: Optional[str] = None
     severity: Optional[Severity] = None
+    sources: list[str] = Field(default_factory=list)  # URLs from Tavily web search
 
 
 class ScreeningOutput(BaseModel):
@@ -165,9 +166,18 @@ class IDVerificationOutput(BaseModel):
 
 
 class FinancialProfileOutput(BaseModel):
+    # Original fields — risk.py reads only these three
     income_plausibility_score: float = Field(ge=0, le=1)
     geography_risk: float = Field(ge=0, le=1)
     employment_risk: float = Field(ge=0, le=1)
+    # Deep-agent enrichment — all Optional for backward compat
+    employment_category: Optional[str] = None       # one of 8 AML tiers
+    income_band_min: Optional[float] = None         # expected annual INR floor
+    income_band_max: Optional[float] = None         # expected annual INR cap (None = no cap)
+    income_band_ok: Optional[bool] = None           # declared income within band
+    financial_risk_rationale: Optional[str] = None  # LLM one-sentence rationale
+    employment_contradiction: bool = False           # income logically impossible for employment type
+    contradiction_reason: Optional[str] = None      # human-readable explanation of the contradiction
 
 
 # ── Risk Aggregation (§4.7) — deterministic ─────────────────────────────────
@@ -224,12 +234,14 @@ EvalVerdict = Literal["pass", "warn", "fail"]
 
 class EvalOutput(BaseModel):
     """Structured quality score produced by the LLM-as-judge eval agent."""
-    faithfulness: float = Field(ge=0, le=1)     # 1.0 = zero hallucinated signals
-    coverage: float = Field(ge=0, le=1)          # fraction of high-weight signals in narrative
+    faithfulness: float = Field(ge=0, le=1)       # 1.0 = zero hallucinated signals
+    coverage: float = Field(ge=0, le=1)            # fraction of high-weight signals in narrative
+    score_alignment: float = Field(default=1.0, ge=0, le=1)  # narrative tone matches risk score tier
+    hallucinations: list[str] = Field(default_factory=list)  # topics in narrative with no contributor basis
     missing_signals: list[str] = Field(default_factory=list)       # high-weight but absent
     hallucinated_signals: list[str] = Field(default_factory=list)  # in narrative, not in contributors
     verdict: EvalVerdict
-    rationale: str                               # one-sentence LLM justification
+    rationale: str                                 # one-sentence LLM justification
 
 
 # ── Decision (§4.9) ─────────────────────────────────────────────────────────
@@ -240,6 +252,7 @@ Decision = Literal["approve", "review", "escalate", "reject"]
 class DecisionOutput(BaseModel):
     decision: Decision
     requires_human: bool
+    reasons: list[str] = Field(default_factory=list)  # human-readable reasons for HITL
 
 
 class HumanDecision(BaseModel):
@@ -261,6 +274,10 @@ class GpuCallMetric(BaseModel):
     ts: str
     model: str
     latency_ms: float
+    agent: Optional[str] = None              # pipeline agent that triggered this call
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    tokens_per_second: Optional[float] = None   # (input+output) / latency_s
     vram_used_gb: Optional[float] = None
     gpu_util_pct: Optional[float] = None
     batch_size: Optional[int] = None
@@ -279,6 +296,15 @@ class AuditEvent(BaseModel):
     agent: str
     event: str
     payload: Optional[Any] = None
+
+
+class GuardrailViolation(BaseModel):
+    """Recorded whenever a guardrail check fires — input, injection, or jailbreak."""
+    ts: str
+    agent: str                  # pipeline stage where violation was caught
+    check: str                  # slug: "under_18", "prompt_injection:pan", "jailbreak:extraction"
+    level: str                  # "info" | "warn" | "critical"
+    violations: list[str]       # human-readable descriptions
 
 
 class AgentOutputs(BaseModel):
@@ -308,3 +334,4 @@ class CaseState(BaseModel):
     agent_outputs: AgentOutputs = Field(default_factory=AgentOutputs)
     audit_log: list[AuditEvent] = Field(default_factory=list)
     metrics: CaseMetrics = Field(default_factory=CaseMetrics)
+    guardrail_flags: list[GuardrailViolation] = Field(default_factory=list)

@@ -51,6 +51,10 @@ services:
       API_BASE: http://api:7860
     ports:
       - "8501:8501"
+    volumes:
+      # Bind-mount so live dashboard edits take effect without a rebuild.
+      - ./apps/ui:/repo/apps/ui
+      - ./personas:/repo/personas:ro
     depends_on:
       api:
         condition: service_healthy

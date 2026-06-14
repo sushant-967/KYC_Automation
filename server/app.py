@@ -32,6 +32,7 @@ from schemas import (AgentOutputs, AuditEvent, CaseMetrics, CaseState, DocumentR
 from store import CaseStore
 from screening_index import ScreeningIndex
 from vllm_client import VllmClient, make_vllm_client
+from tavily_client import TavilyClient
 from pipeline import PipelineIO, run_pipeline
 from agents.intake import run_intake
 
@@ -57,6 +58,7 @@ class Hub:
         else:
             self.index = ScreeningIndex()
             self.vllm = make_vllm_client()
+        self.tavily = TavilyClient.from_env()  # None if TAVILY_API_KEY not set
         self._subs: dict[str, set[asyncio.Queue]] = {}
 
     def subscribe(self, case_id: str) -> asyncio.Queue:
@@ -104,9 +106,85 @@ def _now() -> str:
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 
+@app.get("/api/metrics/gpu")
+async def gpu_metrics() -> dict:
+    """Live GPU metrics — tries rocm-smi (AMD MI300X), then nvidia-smi, then returns nulls."""
+    import subprocess, json as _json
+
+    def _rocm() -> dict | None:
+        try:
+            r = subprocess.run(
+                ["rocm-smi", "--showmeminfo", "vram", "--showuse", "--showtemp", "--json"],
+                capture_output=True, text=True, timeout=5)
+            if r.returncode != 0:
+                return None
+            data = _json.loads(r.stdout)
+            # rocm-smi JSON key is "card0" or the first GPU entry
+            card = next(iter(data.values()))
+            vram_total = int(card.get("VRAM Total Memory (B)", 0))
+            vram_used  = int(card.get("VRAM Total Used Memory (B)", 0))
+            gpu_util   = float(card.get("GPU use (%)", 0) or 0)
+            temp       = float(card.get("Temperature (Sensor edge) (C)", 0) or 0)
+            return {
+                "vram_used_gb":  round(vram_used  / 1e9, 1),
+                "vram_total_gb": round(vram_total / 1e9, 1),
+                "vram_pct":      round(vram_used / vram_total * 100, 1) if vram_total else 0,
+                "gpu_util_pct":  gpu_util,
+                "temperature_c": temp,
+                "source": "rocm-smi",
+            }
+        except Exception:
+            return None
+
+    def _nvidia() -> dict | None:
+        try:
+            r = subprocess.run(
+                ["nvidia-smi",
+                 "--query-gpu=memory.used,memory.total,utilization.gpu,temperature.gpu",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5)
+            if r.returncode != 0:
+                return None
+            parts = [p.strip() for p in r.stdout.strip().split(",")]
+            if len(parts) < 4:
+                return None
+            used_mb, total_mb, util, temp = parts[:4]
+            used, total = float(used_mb), float(total_mb)
+            return {
+                "vram_used_gb":  round(used  / 1024, 1),
+                "vram_total_gb": round(total / 1024, 1),
+                "vram_pct":      round(used / total * 100, 1) if total else 0,
+                "gpu_util_pct":  float(util),
+                "temperature_c": float(temp),
+                "source": "nvidia-smi",
+            }
+        except Exception:
+            return None
+
+    result = await asyncio.to_thread(_rocm) or await asyncio.to_thread(_nvidia)
+    if result:
+        return result
+    return {
+        "vram_used_gb": None, "vram_total_gb": None,
+        "vram_pct": None, "gpu_util_pct": None,
+        "temperature_c": None, "source": "unavailable",
+    }
+
+
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"ok": True, "demo": hub.demo, "entities_loaded": len(hub.index.rows)}
+    circuit = (hub.vllm.circuit_states()
+               if hasattr(hub.vllm, "circuit_states") else {})
+    degraded = any(v != "closed" for k, v in circuit.items()
+                   if isinstance(v, str))
+    return {
+        "ok": True,
+        "demo": hub.demo,
+        "entities_loaded": len(hub.index.rows),
+        "tavily": hub.tavily is not None,
+        "circuit_breakers": circuit,
+        "backend_degraded": degraded,
+    }
 
 
 @app.post("/api/upload")
@@ -163,7 +241,17 @@ async def stream_case(case_id: str) -> StreamingResponse:
     if not state:
         raise HTTPException(status_code=404, detail="no such case")
     q = hub.subscribe(case_id)
-    # Replay current status so a late subscriber isn't blank.
+    # Replay per-agent done/degraded events from the AUDIT TABLE (not
+    # state.audit_log, which only reflects the last full hub.store.save() and
+    # is empty during live pipeline runs). The audit table is written on every
+    # emit() call so it always has the real-time history. This ensures a late
+    # SSE subscriber (Streamlit opens the stream ~200 ms after create_case, by
+    # which time intake and sometimes extraction have already completed) sees
+    # all finished agents in the correct order before receiving live events.
+    for ev in hub.store.get_audit(case_id):
+        if ev.event in ("done", "degraded"):
+            q.put_nowait({"agent": ev.agent, "status": ev.event})
+    # Always send the current pipeline status last so the UI knows whether to stop.
     q.put_nowait({"agent": "pipeline", "status": state.status})
 
     async def gen():
@@ -273,13 +361,14 @@ async def _execute(case_id: str) -> None:
     io = PipelineIO(
         load_image=_load_image,
         entity_index=hub.index,
-        prior_case_lookup=lambda _name: [],  # TODO: query prior cases from the store
+        prior_case_lookup=lambda _name: [],
         emit=emit,
+        tavily=hub.tavily,
     )
     try:
         state = await run_pipeline(state, hub.vllm, io)
     except Exception as e:  # surface failures to the UI instead of hanging
-        state.status = "rejected"
+        state.status = "escalated"   # "rejected" implies a KYC decision; this is a system error
         emit("pipeline", "error", {"error": str(e)})
     finally:
         hub.store.save(state)
