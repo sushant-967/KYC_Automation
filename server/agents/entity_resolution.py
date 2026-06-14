@@ -50,7 +50,8 @@ def run_entity_resolution(
     canonical = canonicalize(customer.full_name)
 
     extracted_dobs = [str(d.fields.get("dob", "")) for d in extraction.documents]
-    dob_confirmed = any(_same_date(d, customer.dob) for d in extracted_dobs if d)
+    dob_confirmed = bool(customer.dob and
+                         any(_same_date(d, customer.dob) for d in extracted_dobs if d))
 
     # Exclude the affidavit itself from per-document name matching.
     id_docs = [d for d in extraction.documents
@@ -219,11 +220,40 @@ def _address_score(a: str, b: str) -> float:
 
 # ── DOB ─────────────────────────────────────────────────────────────────────
 
-def _same_date(a: str, b: str) -> bool:
+_DATE_FMTS = [
+    "%Y-%m-%d",   # ISO — 1990-06-14
+    "%d/%m/%Y",   # Aadhaar / PAN / DL printed format — 14/06/1990
+    "%d-%m-%Y",   # dash variant — 14-06-1990
+    "%Y/%m/%d",   # rare — 1990/06/14
+    "%d %b %Y",   # 14 Jun 1990
+    "%d %B %Y",   # 14 June 1990
+    "%B %d, %Y",  # June 14, 1990
+    "%b %d, %Y",  # Jun 14, 1990
+]
+
+
+def _parse_date(s: str) -> Optional[date]:
+    s = s.strip()
+    for fmt in _DATE_FMTS:
+        try:
+            from datetime import datetime
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    # last resort: ISO fromisoformat on first 10 chars
     try:
-        return date.fromisoformat(a[:10]) == date.fromisoformat(b[:10])
-    except ValueError:
-        return a.strip() == b.strip()
+        return date.fromisoformat(s[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _same_date(a: str, b: Optional[str]) -> bool:
+    if not a or not b:
+        return False
+    da, db = _parse_date(a), _parse_date(b)
+    if da and db:
+        return da == db
+    return a.strip() == b.strip()
 
 
 # ── Dual name affidavit verification ────────────────────────────────────────
